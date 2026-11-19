@@ -6,7 +6,7 @@
 # name = "Spoolman Profiles"
 # description = "Creates standalone OrcaSlicer filament profiles (filament ID PSM<id>) from Spoolman and shows the Spoolman web UI in a tab."
 # author = "indx-trident-350"
-# version = "1.1.0"
+# version = "1.2.0"
 # ///
 
 """Spoolman Profiles - OrcaSlicer 2.5 plugin for the Voron Trident 350 INDX setup.
@@ -55,7 +55,7 @@ except ImportError:  # pragma: no cover
     orca = None
 
 PLUGIN_NAME = "Spoolman Profiles"
-PLUGIN_VERSION = "1.1.0"
+PLUGIN_VERSION = "1.2.0"
 BUNDLE_ID = "spoolman-profiles"
 ID_PREFIX = "PSM"
 TIMEOUT = 15
@@ -65,6 +65,7 @@ DEFAULT_SETTINGS = {
     "template_prefix": "SM-Vorlage",
     "auto_sync": True,
     "include_all": False,
+    "layout": "two_tabs",
     "spoolio_fallback": True,
 }
 
@@ -76,6 +77,8 @@ SPOOLIO_FIELDS = {
     "retraction_speed": "filament_retraction_speed",
 }
 PLATES = ("hot_plate", "textured_plate", "cool_plate", "eng_plate", "supertack_plate", "textured_cool_plate")
+# Tabs shown in OrcaSlicer (read when Orca starts, tabs are only created then).
+LAYOUTS = ("two_tabs", "spoolman_tab", "profiles_tab")
 INVALID_FILENAME_CHARS = '<>:"/\\|?*' + "".join(chr(i) for i in range(32))
 
 
@@ -125,9 +128,9 @@ def _setup_log() -> None:
         log.addHandler(logging.NullHandler())
 
 
-# The same settings can be edited in three places: the Spoolman tab, and the config of each
-# capability in File > Plugins (Orca stores those itself and has no change callback). Every
-# copy carries "saved_at"; the newest one wins and is copied to the others.
+# The settings can be edited in the Spoolman Profiles tab/window and in the config of the
+# command capability in File > Plugins (Orca stores that itself and has no change callback).
+# Every copy carries "saved_at"; the newest one wins and is copied to the other.
 _caps: list = []  # capability instances, for get_config()/save_config()
 
 
@@ -136,6 +139,8 @@ def _normalize(data: dict) -> dict:
     s.update({k: data[k] for k in DEFAULT_SETTINGS if k in data})
     s["spoolman_url"] = str(s["spoolman_url"] or "").strip().rstrip("/")
     s["template_prefix"] = str(s["template_prefix"] or "").strip() or DEFAULT_SETTINGS["template_prefix"]
+    if s["layout"] not in LAYOUTS:
+        s["layout"] = DEFAULT_SETTINGS["layout"]
     for k in ("auto_sync", "include_all", "spoolio_fallback"):
         v = s[k]
         s[k] = v.strip().lower() in ("1", "true", "yes", "on") if isinstance(v, str) else bool(v)
@@ -721,7 +726,7 @@ button:disabled { opacity: .5; cursor: default; }
 #settings { padding: 10px; }
 #settings h3 { margin: 0 0 10px; font-size: 13px; }
 #settings label { display: block; margin: 0 0 8px; }
-#settings input[type=text] { width: 100%; box-sizing: border-box; padding: 4px; font: inherit; }
+#settings input[type=text], #settings select { width: 100%; box-sizing: border-box; padding: 4px; font: inherit; }
 small, #msg { opacity: .75; }
 </style></head><body>
 <div id="bar">
@@ -737,8 +742,13 @@ small, #msg { opacity: .75; }
   <label><input type="checkbox" name="auto_sync"> Update automatically when OrcaSlicer starts</label>
   <label><input type="checkbox" name="spoolio_fallback"> Also read Spoolio's fields (flow_ratio, max_volumetric_speed, retraction_length, retraction_speed) as a fallback</label>
   <label><input type="checkbox" name="include_all"> Also archived filaments and filaments without a spool</label>
+  <label>Layout (after restarting OrcaSlicer)<br><select name="layout">
+    <option value="two_tabs">Two tabs: Spoolman + Spoolman Profiles</option>
+    <option value="spoolman_tab">Spoolman tab only (buttons: command "Update profiles from Spoolman")</option>
+    <option value="profiles_tab">Spoolman Profiles tab only (Spoolman opens in the browser)</option>
+  </select></label>
   <button class="main" type="button" id="save">Save</button> <span id="msg"></span>
-  <p><small>Same settings as in File &gt; Plugins &gt; Spoolman Profiles &gt; Config. After changing the address,
+  <p><small>Same settings as in File &gt; Plugins &gt; Config &gt; Update profiles from Spoolman. After changing the address,
   restart OrcaSlicer so the Spoolman tab loads it.</small></p>
 </form>
 <script>
@@ -805,7 +815,7 @@ CONFIG_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><style>
 body { margin: 0; padding: 14px; }
 label { display: block; margin: 0 0 10px; }
 label.t span { display: block; margin-bottom: 3px; font-weight: 600; }
-input[type=text] { width: 100%; box-sizing: border-box; padding: 5px; font: inherit; }
+input[type=text], select { width: 100%; box-sizing: border-box; padding: 5px; font: inherit; }
 small { opacity: .7; }
 #msg { margin-left: 8px; opacity: .8; }
 </style></head><body>
@@ -816,8 +826,13 @@ small { opacity: .7; }
 <label><input type="checkbox" name="auto_sync"> Update automatically when OrcaSlicer starts</label>
 <label><input type="checkbox" name="spoolio_fallback"> Also read Spoolio's fields (flow_ratio, max_volumetric_speed, retraction_length, retraction_speed) as a fallback</label>
 <label><input type="checkbox" name="include_all"> Also archived filaments and filaments without a spool</label>
+<label>Layout (after restarting OrcaSlicer)<br><select name="layout">
+    <option value="two_tabs">Two tabs: Spoolman + Spoolman Profiles</option>
+    <option value="spoolman_tab">Spoolman tab only (buttons: command "Update profiles from Spoolman")</option>
+    <option value="profiles_tab">Spoolman Profiles tab only (Spoolman opens in the browser)</option>
+  </select></label>
 <button type="button" id="save">Save</button><span id="msg"></span>
-<p><small>The same settings are in the Spoolman tab (Settings). Changes apply to the next update.</small></p>
+<p><small>The same settings are in the Spoolman Profiles tab. Changes apply to the next update; the layout and the Spoolman tab address after restarting OrcaSlicer.</small></p>
 </form><script>
 (function () {
   var f = document.getElementById("f");
@@ -851,6 +866,17 @@ small { opacity: .7; }
 </script></body></html>"""
 
 
+# Orca lists every capability in File > Plugins > Config and cannot hide one; only the
+# command capability carries the settings, the tabs point there.
+INFO_CONFIG_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><style>
+:root { color-scheme: light dark; font: 13px "Segoe UI", system-ui, sans-serif; } body { margin: 0; padding: 14px; }
+</style></head><body>
+<p>This entry has no settings of its own.</p>
+<p>All settings of Spoolman Profiles are under the entry <b>Update profiles from Spoolman</b>
+(and in the Spoolman Profiles tab).</p>
+</body></html>"""
+
+
 if orca is not None:
 
     class _SettingsConfig:
@@ -875,12 +901,17 @@ if orca is not None:
             except Exception:  # noqa: BLE001
                 log.debug("config sync failed", exc_info=True)
 
-    class SpoolmanPage(_SettingsConfig, orca.pages.PagesPluginCapabilityBase):
-        """Tab "Spoolman": the Spoolman web UI (or the settings while no address is set)."""
+    class _InfoConfig:
+        """Config entry of a tab: only a pointer to the real settings."""
 
-        def __init__(self):
-            super().__init__()
-            self._register_config()
+        def has_config_ui(self):
+            return True
+
+        def get_config_ui(self):
+            return INFO_CONFIG_HTML
+
+    class SpoolmanPage(_InfoConfig, orca.pages.PagesPluginCapabilityBase):
+        """Tab "Spoolman": the Spoolman web UI (or the settings while no address is set)."""
 
         def get_name(self):
             return "Spoolman"
@@ -910,17 +941,12 @@ if orca is not None:
 
         def on_load(self):
             _setup_log()
-            self._sync_config()
 
         def on_unload(self):
             _ui_targets.pop("tab", None)
 
-    class SpoolmanProfilesPage(_SettingsConfig, orca.pages.PagesPluginCapabilityBase):
+    class SpoolmanProfilesPage(_InfoConfig, orca.pages.PagesPluginCapabilityBase):
         """Tab "Spoolman Profiles": update button, status and settings."""
-
-        def __init__(self):
-            super().__init__()
-            self._register_config()
 
         def get_name(self):
             return "Spoolman Profiles"
@@ -946,7 +972,6 @@ if orca is not None:
 
         def on_load(self):
             _setup_log()
-            self._sync_config()
 
         def on_unload(self):
             _ui_targets.pop("panel_tab", None)
@@ -966,6 +991,14 @@ if orca is not None:
             log.info("%s %s loaded", PLUGIN_NAME, PLUGIN_VERSION)
             self._sync_config()
             _bg(_startup_sync)
+
+        def on_unload(self):
+            # The layout is read before any capability exists at the next start, i.e. from
+            # settings.json only: take over a change made in File > Plugins now.
+            try:
+                load_settings()
+            except Exception:  # noqa: BLE001
+                log.debug("settings sync on unload failed", exc_info=True)
 
         window = None
 
@@ -999,6 +1032,10 @@ if orca is not None:
                     orca.request_permissions(threading=True)
             except Exception:  # noqa: BLE001
                 log.debug("request_permissions failed", exc_info=True)
-            orca.register_capability(SpoolmanPage)
-            orca.register_capability(SpoolmanProfilesPage)
-            orca.register_capability(SpoolmanProfilesScript)
+            # Registration order is the order in File > Plugins > Config: settings entry first.
+            orca.register_capability(SpoolmanProfilesScript)  # always: settings, startup update, window
+            layout = load_settings()["layout"]
+            if layout in ("two_tabs", "spoolman_tab"):
+                orca.register_capability(SpoolmanPage)
+            if layout in ("two_tabs", "profiles_tab"):
+                orca.register_capability(SpoolmanProfilesPage)
