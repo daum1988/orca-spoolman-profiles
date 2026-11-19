@@ -4,16 +4,16 @@
 The plugin is one pure-Python file. Orca Cloud tells platform builds apart by the
 file name suffix, so the same file is written once per target into dist/.
 
-    python orca/spoolman_profiles/build.py                     # check version, build dist/
-    python orca/spoolman_profiles/build.py --tag spoolman-profiles-v1.2.0
-    python orca/spoolman_profiles/build.py --changelog-out notes.md
+    python build.py                          # check version, build dist/
+    python build.py --tag v1.7.0
+    python build.py --changelog-out notes.md
 
 --tag fails unless the tag matches the plugin version; --changelog-out writes the
 CHANGELOG.md section of that version (the text Orca shows as the changelog).
 
 Releasing: bump "# version = ..." and PLUGIN_VERSION in spoolman_profiles.py, add a
 CHANGELOG.md section, commit, then publish a GitHub release with the tag
-spoolman-profiles-v<version>. .github/workflows/publish-orcacloud.yml uploads it.
+v<version>. .github/workflows/publish-orcacloud.yml uploads it to Orca Cloud.
 """
 
 import argparse
@@ -26,7 +26,7 @@ HERE = Path(__file__).resolve().parent
 PLUGIN = HERE / "spoolman_profiles.py"
 CHANGELOG = HERE / "CHANGELOG.md"
 DIST = HERE / "dist"
-TAG_PREFIX = "spoolman-profiles-v"
+TAG_PREFIX = "v"
 TARGETS = ("win_x86_64", "win_arm64", "linux_x86_64", "linux_arm64", "macosx_arm64", "macosx_x86_64")
 
 

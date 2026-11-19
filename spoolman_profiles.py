@@ -30,10 +30,11 @@ retraction_speed) are read as a fallback when enabled.
 
 Developed with the help of AI (Anthropic's Claude) as part of the author's first
 project; so far only tested on the author's printer (Voron Trident 350 INDX,
-OrcaSlicer 2.5.1). Repository: https://github.com/daum1988/indx-trident-350
+OrcaSlicer 2.5.1). Repository: https://github.com/daum1988/orca-spoolman-profiles
+Printer side (lane_data for the filament sync, INDX setup): https://github.com/daum1988/indx-trident-350
 
-Install: put this file into %APPDATA%\\OrcaSlicer\\orca_plugins\\spoolman_profiles\\,
-restart Orca, File > Plugins, tick Activate.
+Install: subscribe in Orca Cloud, or put this file into
+%APPDATA%\\OrcaSlicer\\orca_plugins\\spoolman_profiles\\, restart Orca, File > Plugins, tick Activate.
 """
 
 import copy
