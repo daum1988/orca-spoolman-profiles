@@ -3,6 +3,51 @@
 Each section is the text OrcaSlicer shows as the release's changelog.
 The newest version is at the top; keep the heading format `## [x.y.z] - YYYY-MM-DD`.
 
+## [1.6.0] - 2026-11-19
+
+### Changed
+- The tab with the profile update and the statistics is now called
+  **Spools & Stats** (was "Spoolman Profiles"; the plugin keeps its name).
+- The Statistics header also shows the filament since the *Tool statistics
+  since* date and the INDX tool change counter.
+
+## [1.5.0] - 2026-11-19
+
+### Added
+- Setting **Tool statistics since** (date the tool changer was installed): the
+  per-tool grams and the tool changes ignore older prints, e.g. those of a
+  previous single-nozzle toolhead. All other statistics still count every print.
+- Setting **Show per-tool statistics and tool changes** (default on): turn it
+  off on printers with a single tool.
+- Filament card: all-time total, total since the *Tool statistics since* date
+  and Moonraker's lifetime filament counter (metres).
+
+### Changed
+- Redesigned Spoolman Profiles tab: section headers with icons and status
+  chip, KPI cards, period buttons, week chart with axis, materials as a donut,
+  tool badges, status chips in the print history; works in light and dark mode.
+
+## [1.4.0] - 2026-11-19
+
+### Added
+- Statistics **per tool** (T0–T8): grams and number of prints, with the colour
+  and name of the spool assigned to each tool now.
+- **Tool changes**: per period from the print files, plus the INDX counter
+  (`toolchange_count`) of the printer.
+
+## [1.3.0] - 2026-11-19
+
+### Added
+- **Statistics** in the Spoolman Profiles tab, read from Moonraker's print
+  history and Spoolman (nothing is booked): filament used, prints, cost, low
+  stock, use per week by colour, materials, most used filaments, spools running
+  low and the print history. Period selectable (7 days to all time).
+- Settings **Printer address (Moonraker)** and **Low stock below (g)**.
+
+### Changed
+- The Spoolman Profiles tab has two collapsible sections, Profiles and
+  Statistics. Settings are only in File > Plugins > Config.
+
 ## [1.2.0] - 2026-11-19
 
 ### Added

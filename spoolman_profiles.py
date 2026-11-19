@@ -6,7 +6,7 @@
 # name = "Spoolman Profiles"
 # description = "Creates standalone OrcaSlicer filament profiles (filament ID PSM<id>) from Spoolman and shows the Spoolman web UI in a tab."
 # author = "indx-trident-350"
-# version = "1.2.0"
+# version = "1.6.0"
 # ///
 
 """Spoolman Profiles - OrcaSlicer 2.5 plugin for the Voron Trident 350 INDX setup.
@@ -59,13 +59,17 @@ except ImportError:  # pragma: no cover
     orca = None
 
 PLUGIN_NAME = "Spoolman Profiles"
-PLUGIN_VERSION = "1.2.0"
+PLUGIN_VERSION = "1.6.0"
 BUNDLE_ID = "spoolman-profiles"
 ID_PREFIX = "PSM"
 TIMEOUT = 15
 
 DEFAULT_SETTINGS = {
     "spoolman_url": "",
+    "moonraker_url": "",
+    "low_stock_g": 100,
+    "tools_since": "",
+    "show_tools": True,
     "template_prefix": "SM-Vorlage",
     "auto_sync": True,
     "include_all": False,
@@ -132,7 +136,7 @@ def _setup_log() -> None:
         log.addHandler(logging.NullHandler())
 
 
-# The settings can be edited in the Spoolman Profiles tab/window and in the config of the
+# The settings can be edited in the Spools & Stats tab/window and in the config of the
 # command capability in File > Plugins (Orca stores that itself and has no change callback).
 # Every copy carries "saved_at"; the newest one wins and is copied to the other.
 _caps: list = []  # capability instances, for get_config()/save_config()
@@ -142,10 +146,20 @@ def _normalize(data: dict) -> dict:
     s = dict(DEFAULT_SETTINGS)
     s.update({k: data[k] for k in DEFAULT_SETTINGS if k in data})
     s["spoolman_url"] = str(s["spoolman_url"] or "").strip().rstrip("/")
+    mr = str(s["moonraker_url"] or "").strip().rstrip("/")
+    if mr and not mr.startswith(("http://", "https://")):
+        mr = "http://" + mr
+    s["moonraker_url"] = mr
+    ts = str(s["tools_since"] or "").strip()
+    s["tools_since"] = ts if re.fullmatch(r"\d{4}-\d{2}-\d{2}", ts) else ""
+    try:
+        s["low_stock_g"] = max(0, min(100000, int(float(s["low_stock_g"]))))
+    except (TypeError, ValueError):
+        s["low_stock_g"] = DEFAULT_SETTINGS["low_stock_g"]
     s["template_prefix"] = str(s["template_prefix"] or "").strip() or DEFAULT_SETTINGS["template_prefix"]
     if s["layout"] not in LAYOUTS:
         s["layout"] = DEFAULT_SETTINGS["layout"]
-    for k in ("auto_sync", "include_all", "spoolio_fallback"):
+    for k in ("auto_sync", "include_all", "spoolio_fallback", "show_tools"):
         v = s[k]
         s[k] = v.strip().lower() in ("1", "true", "yes", "on") if isinstance(v, str) else bool(v)
     try:
@@ -460,6 +474,338 @@ def fetch_spoolman(url: str) -> tuple[list, list]:
     return out[0], out[1]
 
 
+# --------------------------------------------------------------------------- statistics
+
+# Read-only: Moonraker's job history (per print: status, time, grams per tool from the
+# slicer, filament names with "(SM<id>)") plus Spoolman for colour, material, price and
+# remaining weight. Nothing is booked.
+HISTORY_FILE = STATE_DIR / "history_cache.json"
+UI_FILE = STATE_DIR / "ui_state.json"
+PERIODS = (7, 30, 90, 365, 0)  # days, 0 = all
+WEEKS = 8
+CURRENCY_SYMBOLS = {"EUR": "€", "USD": "$", "GBP": "£", "CHF": "CHF", "JPY": "¥"}
+_hist_lock = threading.Lock()
+
+
+def load_ui() -> dict:
+    ui = {"collapsed": {"profiles": False, "stats": False}, "period": 30}
+    try:
+        data = json.loads(UI_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            c = data.get("collapsed")
+            if isinstance(c, dict):
+                ui["collapsed"].update({k: bool(c[k]) for k in ui["collapsed"] if k in c})
+            if data.get("period") in PERIODS:
+                ui["period"] = data["period"]
+    except (OSError, ValueError):
+        pass
+    return ui
+
+
+def save_ui(data: dict) -> None:
+    ui = load_ui()
+    c = data.get("collapsed")
+    if isinstance(c, dict):
+        ui["collapsed"].update({k: bool(c[k]) for k in ui["collapsed"] if k in c})
+    try:
+        if int(data.get("period")) in PERIODS:
+            ui["period"] = int(data["period"])
+    except (TypeError, ValueError):
+        pass
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        UI_FILE.write_text(json.dumps(ui), encoding="utf-8")
+    except OSError:
+        log.warning("Could not write %s", UI_FILE)
+
+
+def _http_json(url: str):
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def _jlist(v) -> list[str]:
+    """Moonraker keeps some metadata lists as JSON text ('["PLA", "PETG"]') or ';'-separated."""
+    if v is None:
+        return []
+    if isinstance(v, list):
+        return [str(x) for x in v]
+    s = str(v).strip()
+    if s.startswith("["):
+        try:
+            x = json.loads(s)
+            if isinstance(x, list):
+                return [str(i) for i in x]
+        except ValueError:
+            pass
+    return [part.strip().strip('"') for part in s.split(";")] if s else []
+
+
+def _floats(v) -> list[float]:
+    out = []
+    for x in (_jlist(v) if isinstance(v, str) else v or []):
+        try:
+            out.append(float(x))
+        except (TypeError, ValueError):
+            out.append(0.0)
+    return out
+
+
+def compact_job(j: dict) -> dict | None:
+    status = str(j.get("status") or "")
+    if status == "in_progress":
+        return None
+    m = j.get("metadata") or {}
+    weights = _floats(m.get("filament_weights"))
+    try:
+        changes = int(m["filament_change_count"]) if m.get("filament_change_count") is not None else None
+    except (TypeError, ValueError):
+        changes = None
+    if not any(weights):
+        weights = _floats([m.get("filament_weight_total")]) if m.get("filament_weight_total") else []
+    try:
+        return {"id": str(j.get("job_id")), "name": str(j.get("filename") or ""),
+                "start": float(j.get("start_time") or 0), "status": status,
+                "used_mm": float(j.get("filament_used") or 0), "total_mm": float(m.get("filament_total") or 0),
+                "weights": weights, "changes": changes, "names": _jlist(m.get("filament_name")),
+                "types": _jlist(m.get("filament_type")), "colors": _jlist(m.get("filament_colors"))}
+    except (TypeError, ValueError):
+        return None
+
+
+def fetch_history(base: str) -> list[dict]:
+    """All finished jobs; cached, so later calls only fetch what is new."""
+    with _hist_lock:
+        try:
+            cache = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+            jobs = cache.get("jobs", {}) if cache.get("base") == base else {}
+        except (OSError, ValueError):
+            jobs = {}
+        start, limit = 0, 100
+        while True:
+            res = _http_json(f"{base}/server/history/list?limit={limit}&start={start}&order=desc")["result"]
+            page = res.get("jobs") or []
+            changed = False
+            for j in page:
+                c = compact_job(j)
+                if c and jobs.get(c["id"]) != c:
+                    jobs[c["id"]] = c
+                    changed = True
+            start += len(page)
+            # "count" is the size of this page, not of the history: page until one comes back short.
+            if len(page) < limit or not changed:
+                break
+        try:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            HISTORY_FILE.write_text(json.dumps({"base": base, "jobs": jobs}), encoding="utf-8")
+        except OSError:
+            log.warning("Could not write %s", HISTORY_FILE)
+        return list(jobs.values())
+
+
+def printer_variables(base: str) -> dict:
+    """Klipper save_variables (INDX toolchange_count, t<n>__spool_id); {} when Klipper is not ready."""
+    try:
+        res = _http_json(f"{base}/printer/objects/query?save_variables")["result"]
+        return res["status"]["save_variables"]["variables"] or {}
+    except Exception:  # noqa: BLE001 - optional
+        return {}
+
+
+def printer_totals(base: str) -> dict:
+    """Moonraker's lifetime job totals (filament in mm, also jobs without weight metadata)."""
+    try:
+        return _http_json(f"{base}/server/history/totals")["result"]["job_totals"] or {}
+    except Exception:  # noqa: BLE001 - optional
+        return {}
+
+
+def spoolman_currency(url: str) -> str:
+    try:
+        v = _http_json(url.rstrip("/") + "/api/v1/setting/currency").get("value")
+        code = json.loads(v) if isinstance(v, str) else v
+        code = str(code or "EUR")
+    except Exception:  # noqa: BLE001 - optional
+        code = "EUR"
+    return CURRENCY_SYMBOLS.get(code.upper(), code)
+
+
+def _hex(v) -> str:
+    s = str(v or "").strip().lstrip("#").split(",")[0]
+    return "#" + s[:6].upper() if re.fullmatch(r"[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?", s) else "#888888"
+
+
+def _week_start(ts: float) -> float:
+    lt = time.localtime(ts)
+    midnight = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+    return midnight - lt.tm_wday * 86400
+
+
+def compute_stats(jobs: list, filaments: list, spools: list, days: int, low_g: int, currency: str,
+                  now: float | None = None, variables: dict | None = None, tools_since: str = "",
+                  totals: dict | None = None) -> dict:
+    now = now or time.time()
+    since = now - days * 86400 if days else 0
+    # Per-tool data and tool changes only from the day the tool changer was installed:
+    # before that, "tool 1, 2, ..." were filament slots of another toolhead.
+    try:
+        tsince = time.mktime(time.strptime(tools_since, "%Y-%m-%d")) if tools_since else 0.0
+    except ValueError:
+        tsince = 0.0
+    fils = {int(f["id"]): f for f in filaments if f.get("id") is not None}
+    w0 = _week_start(now) - (WEEKS - 1) * 7 * 86400
+    weeks = [{} for _ in range(WEEKS)]
+    used, mats, hist = {}, {}, []
+    total = cost = 0.0
+    prints = cancelled = unmatched = 0
+    tools: dict = {}  # tool index -> {"g", "prints"}
+    total_all = total_tools = 0.0  # independent of the period
+    changes = 0.0
+    change_jobs = 0
+
+    for job in sorted(jobs, key=lambda j: j["start"], reverse=True):
+        if job["status"] == "completed":
+            frac = 1.0
+        else:
+            frac = min(1.0, job["used_mm"] / job["total_mm"]) if job["total_mm"] > 0 else 0.0
+        rows = []
+        for i, w in enumerate(job["weights"]):
+            gr = w * frac
+            if gr < 0.01:
+                continue
+            name = job["names"][i] if i < len(job["names"]) else ""
+            m = re.search(r"\(SM(\d+)\)", name)
+            f = fils.get(int(m.group(1))) if m else None
+            if f:
+                vendor = str((f.get("vendor") or {}).get("name") or "")
+                label = " ".join(x for x in (vendor, str(f.get("name") or "")) if x) or str(f.get("material") or "")
+                colour = _hex(f.get("color_hex") or f.get("multi_color_hexes"))
+                material = str(f.get("material") or "?")
+                ppg = float(f["price"]) / float(f["weight"]) if f.get("price") and f.get("weight") else None
+                key = f"SM{f['id']}"
+            else:
+                label = re.sub(r"^_(local|subscribed)/[^/]+/", "", name).split(" @")[0].strip() or f"Tool {i}"
+                colour = _hex(job["colors"][i] if i < len(job["colors"]) else "")
+                material = job["types"][i] if i < len(job["types"]) else "?"
+                ppg, key = None, "N:" + label
+            rows.append({"tool": i, "key": key, "label": label, "colour": colour, "material": material or "?",
+                         "g": gr, "cost": gr * ppg if ppg else None})
+        if not rows:
+            continue
+        total_all += sum(r["g"] for r in rows)
+        if tsince and job["start"] >= tsince:
+            total_tools += sum(r["g"] for r in rows)
+        if job["start"] >= w0:
+            idx = min(WEEKS - 1, int((job["start"] - w0) // (7 * 86400)))
+            for r in rows:
+                weeks[idx][r["colour"]] = weeks[idx].get(r["colour"], 0.0) + r["g"]
+        if job["start"] < since:
+            continue
+        if job["status"] == "completed":
+            prints += 1
+        else:
+            cancelled += 1
+        if any(not r["key"].startswith("SM") for r in rows):
+            unmatched += 1
+        if job["start"] >= tsince:
+            for r in rows:
+                tl = tools.setdefault(r["tool"], {"g": 0.0, "prints": 0})
+                tl["g"] += r["g"]
+                tl["prints"] += 1
+            if job.get("changes") is not None:
+                changes += job["changes"] * frac
+                change_jobs += 1
+        jg = sum(r["g"] for r in rows)
+        jc = [r["cost"] for r in rows if r["cost"] is not None]
+        total += jg
+        cost += sum(jc)
+        for r in rows:
+            u = used.setdefault(r["key"], {"label": r["label"], "colour": r["colour"], "g": 0.0, "cost": 0.0})
+            u["g"] += r["g"]
+            u["cost"] += r["cost"] or 0.0
+            mats[r["material"]] = mats.get(r["material"], 0.0) + r["g"]
+        hist.append({"t": job["start"], "name": re.sub(r"\.gcode$", "", job["name"].split("/")[-1]),
+                     "status": job["status"], "g": jg, "cost": sum(jc) if jc else None,
+                     "colours": [r["colour"] for r in rows]})
+
+    low = []
+    for s in spools:
+        if s.get("archived") or s.get("remaining_weight") is None:
+            continue
+        rem = float(s["remaining_weight"])
+        if rem >= low_g:
+            continue
+        f = s.get("filament") or {}
+        vendor = str((f.get("vendor") or {}).get("name") or "")
+        init = float(s.get("initial_weight") or f.get("weight") or 0) or 1000.0
+        low.append({"label": " ".join(x for x in (vendor, str(f.get("name") or "")) if x) or f"Spool {s.get('id')}",
+                    "colour": _hex(f.get("color_hex") or f.get("multi_color_hexes")), "g": rem,
+                    "pct": max(0.0, min(1.0, rem / init)), "id": s.get("id")})
+    low.sort(key=lambda x: x["g"])
+
+    variables = variables or {}
+    by_spool = {str(s.get("id")): s for s in spools}
+    tool_rows = []
+    n_tools = max([9] + [k + 1 for k in tools])
+    for i in range(n_tools):
+        sp = by_spool.get(str(variables.get(f"t{i}__spool_id")))
+        f = (sp or {}).get("filament") or {}
+        vendor = str((f.get("vendor") or {}).get("name") or "")
+        spool_label = " ".join(x for x in (vendor, str(f.get("name") or "")) if x)
+        tl = tools.get(i, {"g": 0.0, "prints": 0})
+        tool_rows.append({"label": f"T{i}" + (f" \u00b7 {spool_label}" if spool_label else ""),
+                          "colour": _hex(f.get("color_hex") or f.get("multi_color_hexes")) if sp else "",
+                          "g": tl["g"], "prints": tl["prints"]})
+    try:
+        indx_count = int(variables["toolchange_count"]) if "toolchange_count" in variables else None
+    except (TypeError, ValueError):
+        indx_count = None
+
+    week_rows = []
+    for i, parts in enumerate(weeks):
+        ws = w0 + i * 7 * 86400
+        week_rows.append({"label": time.strftime("%d.%m.", time.localtime(ws)), "total": sum(parts.values()),
+                          "parts": [{"c": c, "g": g} for c, g in sorted(parts.items(), key=lambda x: -x[1])]})
+    return {"total_g": total, "prints": prints, "cancelled": cancelled, "cost": cost, "currency": currency,
+            "low": low, "low_g": low_g, "weeks": week_rows,
+            "materials": [{"name": k, "g": v} for k, v in sorted(mats.items(), key=lambda x: -x[1])],
+            "most": sorted(used.values(), key=lambda x: -x["g"])[:8],
+            "history": hist[:200], "history_count": len(hist), "unmatched": unmatched, "jobs_total": len(jobs),
+            "tools": tool_rows, "changes": round(changes), "change_jobs": change_jobs, "indx_changes": indx_count,
+            "tools_since": tools_since if tsince > since else "",
+            "total_all": total_all, "since_date": tools_since if tsince else "", "total_since": total_tools,
+            "printer_m": float((totals or {}).get("total_filament_used") or 0) / 1000.0}
+
+
+def _stats_and_post(period) -> None:
+    try:
+        period = int(period)
+    except (TypeError, ValueError):
+        period = 30
+    s = load_settings()
+    try:
+        if not s["moonraker_url"]:
+            raise ValueError("Enter the printer address (Moonraker) in File > Plugins > Config > "
+                             "Update profiles from Spoolman.")
+        if not s["spoolman_url"]:
+            raise ValueError("Enter the Spoolman address in File > Plugins > Config > Update profiles from Spoolman.")
+        jobs = fetch_history(s["moonraker_url"])
+        filaments, spools = fetch_spoolman(s["spoolman_url"])
+        d = compute_stats(jobs, filaments, spools, period, s["low_stock_g"], spoolman_currency(s["spoolman_url"]),
+                          variables=printer_variables(s["moonraker_url"]), tools_since=s["tools_since"],
+                          totals=printer_totals(s["moonraker_url"]))
+        d.update(type="stats", period=period, time=time.strftime("%H:%M"), show_tools=s["show_tools"])
+    except urllib.error.URLError as exc:
+        d = {"type": "stats", "error": f"Not reachable: {getattr(exc, 'reason', exc)}"}
+    except ValueError as exc:
+        d = {"type": "stats", "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Statistics failed")
+        d = {"type": "stats", "error": f"Statistics failed: {exc}"}
+    _post(d)
+
+
 # --------------------------------------------------------------------------- Orca side
 
 _lock = threading.Lock()
@@ -654,7 +1000,7 @@ def _post_status() -> None:
 
 
 def _handle_ui_message(data) -> None:
-    """Messages from the control panel (window or tab)."""
+    """Messages from the Spools & Stats page (tab or window)."""
     try:
         if isinstance(data, str):
             data = json.loads(data)
@@ -662,19 +1008,20 @@ def _handle_ui_message(data) -> None:
             return
         t = data.get("type")
         if t == "ready":
+            _post({"type": "ui", **load_ui()})
             _post_status()
         elif t == "sync":
             _bg(_sync_and_notify, "button")
-        elif t == "save":
-            save_settings(data.get("settings") or {})
-            _post_status()
+        elif t == "stats":
+            _bg(_stats_and_post, data.get("period"))
+        elif t == "ui":
+            save_ui(data)
         elif t == "browser":
             u = load_settings()["spoolman_url"]
             if u.startswith(("http://", "https://")):
                 _bg(webbrowser.open, u)
     except Exception:  # noqa: BLE001
         log.exception("UI message failed")
-
 
 def _bg(fn, *args) -> None:
     def run():
@@ -719,77 +1066,331 @@ def _startup_sync() -> None:
 
 
 PANEL_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><style>
-:root { color-scheme: light dark; --b: rgba(127,127,127,.35); --ok: #2e9d57; --bad: #c0392b; --acc: #009688; }
-html, body { margin: 0; font: 13px "Segoe UI", system-ui, sans-serif; }
-#bar { display: flex; gap: 8px; align-items: center; padding: 10px; border-bottom: 1px solid var(--b); flex-wrap: wrap; }
-button { font: inherit; padding: 5px 12px; border-radius: 4px; border: 1px solid var(--b); background: transparent; color: inherit; cursor: pointer; }
-button.main { background: var(--acc); border-color: var(--acc); color: #fff; font-weight: 600; }
+:root { color-scheme: light dark;
+  --line: rgba(127,127,127,.22); --surf: rgba(127,127,127,.07); --surf2: rgba(127,127,127,.12);
+  --muted: .66; --acc: #009688; --acc-soft: rgba(0,150,136,.16);
+  --ok: #2e9d57; --bad: #d64545; --warn: #e8890c; --blue: #3b82f6; --amber: #d9a400; --violet: #8b5cf6;
+  --r: 10px; }
+* { box-sizing: border-box; }
+html, body { margin: 0; font: 13px/1.45 "Segoe UI", system-ui, sans-serif; }
+body { padding: 14px 16px 24px; max-width: 1400px; }
+svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 2;
+  stroke-linecap: round; stroke-linejoin: round; }
+.muted { opacity: var(--muted); }
+
+/* sections */
+.seg { border: 1px solid var(--line); border-radius: var(--r); margin: 0 0 14px; overflow: hidden; }
+.seg > header { display: flex; align-items: center; gap: 10px; padding: 11px 14px; cursor: pointer;
+  user-select: none; background: var(--surf); }
+.seg > header:hover { background: var(--surf2); }
+.seg > header .ico { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center;
+  background: var(--acc-soft); color: var(--acc); }
+.seg > header h2 { margin: 0; font-size: 14px; font-weight: 600; }
+.seg > header .chip { margin-left: auto; }
+.seg > header .chev { transition: transform .18s ease; opacity: .7; }
+.seg.closed > header .chev { transform: rotate(-90deg); }
+.seg.closed > .body { display: none; }
+.seg > .body { padding: 14px; border-top: 1px solid var(--line); }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px;
+  font-size: 12px; background: var(--surf2); white-space: nowrap; }
+.chip.ok { background: rgba(46,157,87,.16); color: var(--ok); }
+.chip.bad { background: rgba(214,69,69,.16); color: var(--bad); }
+.chip .pip { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+
+/* controls */
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+button { font: inherit; display: inline-flex; align-items: center; gap: 7px; padding: 7px 14px;
+  border-radius: 8px; border: 1px solid var(--line); background: transparent; color: inherit; cursor: pointer;
+  transition: background .15s, border-color .15s, opacity .15s; }
+button:hover { background: var(--surf2); }
+button.primary { background: var(--acc); border-color: var(--acc); color: #fff; font-weight: 600; }
+button.primary:hover { filter: brightness(1.08); background: var(--acc); }
 button:disabled { opacity: .5; cursor: default; }
-#status { padding: 10px; white-space: pre-wrap; border-bottom: 1px solid var(--b); min-height: 3em; }
-#status.ok { color: var(--ok); } #status.bad { color: var(--bad); }
-#settings { padding: 10px; }
-#settings h3 { margin: 0 0 10px; font-size: 13px; }
-#settings label { display: block; margin: 0 0 8px; }
-#settings input[type=text], #settings select { width: 100%; box-sizing: border-box; padding: 4px; font: inherit; }
-small, #msg { opacity: .75; }
+button.icon { padding: 7px 9px; }
+.seg-ctl { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg-ctl button { border: 0; border-radius: 0; padding: 6px 12px; }
+.seg-ctl button + button { border-left: 1px solid var(--line); }
+.seg-ctl button.on { background: var(--acc); color: #fff; }
+.spin svg { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* status */
+.status { margin-top: 12px; padding: 10px 12px; border-radius: 8px; background: var(--surf);
+  border-left: 3px solid var(--line); white-space: pre-wrap; }
+.status.ok { border-left-color: var(--ok); }
+.status.bad { border-left-color: var(--bad); }
+.status .t { font-size: 12px; opacity: var(--muted); margin-bottom: 2px; }
+
+/* KPI cards */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin: 14px 0; }
+.kpi { position: relative; padding: 12px 14px; border-radius: var(--r); background: var(--surf);
+  border: 1px solid var(--line); overflow: hidden; }
+.kpi::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 3px; background: var(--c, var(--acc)); }
+.kpi .h { display: flex; align-items: center; gap: 8px; font-size: 12px; opacity: .8; }
+.kpi .h .ic { width: 24px; height: 24px; border-radius: 7px; display: grid; place-items: center;
+  color: var(--c, var(--acc)); background: color-mix(in srgb, var(--c, var(--acc)) 16%, transparent); }
+.kpi .v { font-size: 24px; font-weight: 650; margin-top: 8px; letter-spacing: -.01em; }
+.kpi .v.warn { color: var(--warn); }
+.kpi .s { font-size: 11.5px; opacity: var(--muted); margin-top: 2px; }
+
+/* panels */
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 10px; margin-bottom: 10px; }
+.panel { padding: 12px 14px; border-radius: var(--r); background: var(--surf); border: 1px solid var(--line); min-width: 0; }
+.panel h3 { margin: 0 0 10px; font-size: 13px; font-weight: 600; display: flex; align-items: baseline; gap: 8px; }
+.panel h3 small { font-weight: 400; opacity: var(--muted); font-size: 11.5px; }
+.empty { opacity: var(--muted); padding: 6px 0; }
+.err { color: var(--bad); white-space: pre-wrap; margin-top: 12px; padding: 10px 12px; border-radius: 8px;
+  background: rgba(214,69,69,.1); }
+
+/* bar rows */
+.br { display: grid; grid-template-columns: minmax(130px, 42%) 1fr auto; gap: 10px; align-items: center; padding: 4px 0; }
+.br .n { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.br .n .lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sw { width: 12px; height: 12px; border-radius: 4px; flex: none; box-shadow: inset 0 0 0 1px rgba(127,127,127,.45); }
+.tk { font-size: 11px; font-weight: 650; padding: 1px 6px; border-radius: 5px; background: var(--surf2); flex: none; }
+.track { height: 9px; border-radius: 99px; background: var(--surf2); overflow: hidden; }
+.fill { height: 100%; border-radius: 99px; background: var(--acc); transition: width .4s ease; }
+.val { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.val small { opacity: var(--muted); margin-left: 4px; }
+
+/* week chart */
+.chart { display: grid; grid-template-columns: auto 1fr; gap: 6px; }
+.yax { display: flex; flex-direction: column; justify-content: space-between; font-size: 10.5px;
+  opacity: var(--muted); text-align: right; height: 160px; padding-bottom: 0; }
+.plot { position: relative; height: 160px; display: flex; align-items: flex-end; gap: 8px;
+  background: repeating-linear-gradient(to top, var(--line) 0 1px, transparent 1px 25%); }
+.wk { flex: 1; height: 100%; display: flex; flex-direction: column-reverse; min-width: 0; border-radius: 6px 6px 0 0;
+  overflow: hidden; }
+.wk:hover { filter: brightness(1.1); }
+.wk i { display: block; width: 100%; box-shadow: inset 0 1px 0 rgba(0,0,0,.18); }
+.xax { grid-column: 2; display: flex; gap: 8px; font-size: 10.5px; opacity: var(--muted); }
+.xax span { flex: 1; text-align: center; white-space: nowrap; }
+
+/* donut */
+.donut-wrap { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
+.donut-box { width: 132px; height: 132px; flex: none; position: relative; }
+.donut { position: absolute; inset: 0; border-radius: 50%;
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 22px), #000 calc(100% - 21px));
+          mask: radial-gradient(farthest-side, transparent calc(100% - 22px), #000 calc(100% - 21px)); }
+.donut-box .c { position: absolute; inset: 0; display: grid; place-items: center; z-index: 1; text-align: center;
+  font-weight: 650; font-size: 15px; line-height: 1.2; }
+.donut-box .c small { display: block; font-weight: 400; font-size: 11px; opacity: var(--muted); }
+.legend { flex: 1; min-width: 160px; }
+.legend .li { display: grid; grid-template-columns: auto 1fr auto auto; gap: 8px; align-items: center; padding: 3px 0; }
+.legend .pct { opacity: var(--muted); min-width: 3.2em; text-align: right; font-variant-numeric: tabular-nums; }
+
+/* history */
+details.hist > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; font-weight: 600; }
+details.hist > summary::-webkit-details-marker { display: none; }
+details.hist > summary .chev { transition: transform .18s; transform: rotate(-90deg); opacity: .7; }
+details.hist[open] > summary .chev { transform: none; }
+.tbl { max-height: 420px; overflow: auto; margin-top: 10px; border-radius: 8px; border: 1px solid var(--line); }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--line); }
+th { position: sticky; top: 0; background: var(--bg, Canvas); font-weight: 600; font-size: 12px; opacity: .9; z-index: 1; }
+tr:nth-child(even) td { background: var(--surf); }
+td.r, th.r { text-align: right; white-space: nowrap; }
+td .sws { display: flex; gap: 3px; }
+.st { font-size: 11.5px; padding: 1px 8px; border-radius: 99px; background: var(--surf2); white-space: nowrap; }
+.st.completed { background: rgba(46,157,87,.16); color: var(--ok); }
+.st.error, .st.klippy_shutdown, .st.klippy_disconnect { background: rgba(214,69,69,.16); color: var(--bad); }
+.foot { font-size: 11.5px; opacity: var(--muted); margin-top: 10px; }
 </style></head><body>
-<div id="bar">
-  <button class="main" id="sync">Update profiles from Spoolman</button>
-  <button id="browser">Open Spoolman in browser</button>
-</div>
-<div id="status">Not synced yet.</div>
-<form id="settings">
-  <h3>Settings</h3>
-  <label>Spoolman address<br><input type="text" name="spoolman_url" placeholder="http://spoolman.local:7912"></label>
-  <label>Template prefix<br><input type="text" name="template_prefix"><br>
-    <small>Filament templates in Orca are named "&lt;prefix&gt; &lt;Material&gt; ... @&lt;printer&gt; &lt;size&gt; nozzle".</small></label>
-  <label><input type="checkbox" name="auto_sync"> Update automatically when OrcaSlicer starts</label>
-  <label><input type="checkbox" name="spoolio_fallback"> Also read Spoolio's fields (flow_ratio, max_volumetric_speed, retraction_length, retraction_speed) as a fallback</label>
-  <label><input type="checkbox" name="include_all"> Also archived filaments and filaments without a spool</label>
-  <label>Layout (after restarting OrcaSlicer)<br><select name="layout">
-    <option value="two_tabs">Two tabs: Spoolman + Spoolman Profiles</option>
-    <option value="spoolman_tab">Spoolman tab only (buttons: command "Update profiles from Spoolman")</option>
-    <option value="profiles_tab">Spoolman Profiles tab only (Spoolman opens in the browser)</option>
-  </select></label>
-  <button class="main" type="button" id="save">Save</button> <span id="msg"></span>
-  <p><small>Same settings as in File &gt; Plugins &gt; Config &gt; Update profiles from Spoolman. After changing the address,
-  restart OrcaSlicer so the Spoolman tab loads it.</small></p>
-</form>
+
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="i-spool" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></symbol>
+  <symbol id="i-chart" viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="M7 15v3M12 10v8M17 6v12"/></symbol>
+  <symbol id="i-sync" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></symbol>
+  <symbol id="i-ext" viewBox="0 0 24 24"><path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
+  <symbol id="i-weight" viewBox="0 0 24 24"><path d="M6 8h12l2 12H4z"/><circle cx="12" cy="5" r="2"/></symbol>
+  <symbol id="i-print" viewBox="0 0 24 24"><path d="M4 20h16M6 20V9l6-5 6 5v11"/><path d="M10 20v-6h4v6"/></symbol>
+  <symbol id="i-coin" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M15 9.5a3 3 0 1 0 0 5M8 11h5M8 13h5"/></symbol>
+  <symbol id="i-swap" viewBox="0 0 24 24"><path d="M7 7h11l-3-3M17 17H6l3 3"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3l9 16H3z"/><path d="M12 10v4M12 17h.01"/></symbol>
+</svg>
+
+<section class="seg" id="seg-profiles">
+  <header><span class="ico"><svg class="i"><use href="#i-spool"/></svg></span><h2>Profiles</h2>
+    <span class="chip" id="psub">not synced yet</span><svg class="i chev"><use href="#i-chev"/></svg></header>
+  <div class="body">
+    <div class="row">
+      <button class="primary" id="sync"><svg class="i"><use href="#i-sync"/></svg>Update profiles from Spoolman</button>
+      <button id="browser"><svg class="i"><use href="#i-ext"/></svg>Open Spoolman in browser</button>
+    </div>
+    <div class="status" id="status"><div class="t">Status</div><div id="stext">Not synced yet.</div></div>
+  </div>
+</section>
+
+<section class="seg" id="seg-stats">
+  <header><span class="ico"><svg class="i"><use href="#i-chart"/></svg></span><h2>Statistics</h2>
+    <span class="chip" id="ssub">–</span><svg class="i chev"><use href="#i-chev"/></svg></header>
+  <div class="body">
+    <div class="row">
+      <div class="seg-ctl" id="period">
+        <button data-p="7">7 days</button><button data-p="30">30 days</button><button data-p="90">90 days</button>
+        <button data-p="365">12 months</button><button data-p="0">All</button>
+      </div>
+      <button class="icon" id="reload" title="Refresh"><svg class="i"><use href="#i-sync"/></svg></button>
+      <span class="muted" id="stime"></span>
+    </div>
+    <div id="stats"><div class="empty" style="margin-top:12px">Loading …</div></div>
+  </div>
+</section>
+
+<div class="foot">Settings: File › Plugins › Config › Update profiles from Spoolman.</div>
+
 <script>
 (function () {
   var $ = function (id) { return document.getElementById(id); };
-  var f = $("settings");
+  // Sticky table header needs an opaque colour: take the page's own background.
+  (function () {
+    var bg = getComputedStyle(document.body).backgroundColor;
+    if (!bg || bg === "transparent" || bg === "rgba(0, 0, 0, 0)") bg = getComputedStyle(document.documentElement).backgroundColor;
+    if (bg && bg !== "transparent" && bg !== "rgba(0, 0, 0, 0)") document.documentElement.style.setProperty("--bg", bg);
+  })();
+  var collapsed = { profiles: false, stats: false }, period = 30, loaded = false;
+  var MAT = ["#009688", "#3b82f6", "#e8890c", "#8b5cf6", "#d64545", "#d9a400", "#14b8a6", "#ec4899", "#64748b"];
+  function esc(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+  function grams(x) { return x >= 1000 ? (x / 1000).toFixed(2).replace(".", ",") + " kg" : Math.round(x) + " g"; }
+  function money(x, cur) { return x == null ? "–" : x.toFixed(2).replace(".", ",") + " " + cur; }
+  function sw(c) { return '<span class="sw" style="background:' + esc(c) + '"></span>'; }
+  function ico(id) { return '<svg class="i"><use href="#i-' + id + '"/></svg>'; }
+  function apply() {
+    ["profiles", "stats"].forEach(function (k) { $("seg-" + k).classList.toggle("closed", !!collapsed[k]); });
+    Array.prototype.forEach.call($("period").children, function (b) { b.classList.toggle("on", +b.dataset.p === period); });
+  }
+  function saveUi() { orca.postMessage({ type: "ui", collapsed: collapsed, period: period }); }
+  function loadStats() {
+    loaded = true;
+    $("reload").classList.add("spin");
+    $("stime").textContent = "Loading …";
+    orca.postMessage({ type: "stats", period: period });
+  }
+  ["profiles", "stats"].forEach(function (k) {
+    $("seg-" + k).querySelector("header").onclick = function () {
+      collapsed[k] = !collapsed[k]; apply(); saveUi();
+      if (k === "stats" && !collapsed.stats && !loaded) loadStats();
+    };
+  });
+  function bar(label, g, max, colour, extra, prefix) {
+    var w = max > 0 ? Math.max(g > 0 ? 1.5 : 0, 100 * g / max) : 0;
+    return '<div class="br"><div class="n">' + (prefix || "") + (colour ? sw(colour) : "") +
+      '<span class="lbl" title="' + esc(label) + '">' + esc(label) + '</span></div>' +
+      '<div class="track"><div class="fill" style="width:' + w.toFixed(1) + '%' + (colour ? ';background:' + esc(colour) : '') +
+      '"></div></div><div class="val">' + grams(g) + (extra ? '<small>' + extra + '</small>' : '') + '</div></div>';
+  }
+  function kpi(icon, colour, label, value, sub, cls) {
+    return '<div class="kpi" style="--c:' + colour + '"><div class="h"><span class="ic">' + ico(icon) + '</span>' + label +
+      '</div><div class="v' + (cls ? " " + cls : "") + '">' + value + '</div><div class="s">' + (sub || "&nbsp;") + '</div></div>';
+  }
+  function weeks(d) {
+    var max = Math.max.apply(null, d.weeks.map(function (w) { return w.total; }).concat([0]));
+    if (max <= 0) return '<div class="empty">Nothing printed in the last 8 weeks.</div>';
+    var step = Math.pow(10, Math.floor(Math.log10(max))), top = Math.ceil(max / step) * step;
+    if (top / step > 6) { step *= 2; top = Math.ceil(max / step) * step; }
+    var ticks = [top, top * .75, top * .5, top * .25, 0].map(function (v) { return v >= 1000 ? (v / 1000).toFixed(1) + " kg" : Math.round(v) + " g"; });
+    return '<div class="chart"><div class="yax">' + ticks.map(function (t) { return '<span>' + t + '</span>'; }).join("") + '</div>' +
+      '<div class="plot">' + d.weeks.map(function (w) {
+        return '<div class="wk" title="Week of ' + esc(w.label) + ': ' + grams(w.total) + '">' + w.parts.map(function (p) {
+          return '<i style="height:' + (100 * p.g / top).toFixed(2) + '%;background:' + esc(p.c) + '"></i>'; }).join("") + '</div>';
+      }).join("") + '</div><div class="xax">' + d.weeks.map(function (w) { return '<span>' + esc(w.label) + '</span>'; }).join("") +
+      '</div></div>';
+  }
+  function donut(d) {
+    if (!d.materials.length) return '<div class="empty">Nothing printed in this period.</div>';
+    var acc = 0, stops = [], items = d.materials.slice(0, 8);
+    var rest = d.materials.slice(8).reduce(function (s, m) { return s + m.g; }, 0);
+    if (rest > 0) items.push({ name: "Other", g: rest });
+    items.forEach(function (m, i) {
+      var a = 100 * acc / d.total_g; acc += m.g; var b = 100 * acc / d.total_g;
+      stops.push(MAT[i % MAT.length] + " " + a.toFixed(2) + "% " + b.toFixed(2) + "%");
+    });
+    return '<div class="donut-wrap"><div class="donut-box"><div class="donut" style="background:conic-gradient(' + stops.join(",") + ')"></div>' +
+      '<div class="c"><span>' + grams(d.total_g) + '<small>' + items.length + (items.length === 1 ? ' material' : ' materials') + '</small></span></div></div>' +
+      '<div class="legend">' + items.map(function (m, i) {
+        return '<div class="li">' + sw(MAT[i % MAT.length]) + '<span>' + esc(m.name) + '</span><span class="pct">' +
+          Math.round(100 * m.g / d.total_g) + ' %</span><span class="val">' + grams(m.g) + '</span></div>'; }).join("") + '</div></div>';
+  }
+  function render(d) {
+    $("reload").classList.remove("spin");
+    if (d.error) { $("stats").innerHTML = '<div class="err">' + esc(d.error) + '</div>'; $("stime").textContent = ""; return; }
+    $("stime").textContent = "Updated " + d.time + " · " + d.jobs_total + " jobs in the printer history";
+    $("ssub").textContent = grams(d.total_g) + " · " + d.prints + " prints" +
+      (d.since_date && d.show_tools !== false ? " · since " + d.since_date + ": " + grams(d.total_since) : "") +
+      (d.show_tools !== false && d.indx_changes != null ? " · " + d.indx_changes.toLocaleString() + " tool changes (INDX)" : "");
+    var cur = d.currency, h = '<div class="kpis">';
+    h += kpi("weight", "var(--acc)", "Filament used", grams(d.total_g),
+      "All time: <b>" + grams(d.total_all) + "</b>" +
+      (d.since_date ? "<br>Since " + esc(d.since_date) + (d.show_tools !== false ? " (tool changer)" : "") + ": <b>" + grams(d.total_since) + "</b>" : "") +
+      (d.printer_m ? "<br>Printer counter: " + Math.round(d.printer_m).toLocaleString() + " m" : ""));
+    h += kpi("print", "var(--blue)", "Prints", d.prints, d.cancelled ? d.cancelled + " cancelled / failed (counted partly)" : "none cancelled");
+    h += kpi("coin", "var(--amber)", "Filament cost", d.cost > 0 ? money(d.cost, cur) : "–", "from Spoolman prices");
+    if (d.show_tools !== false)
+      h += kpi("swap", "var(--violet)", "Tool changes" + (d.tools_since ? ' <span class="muted">since ' + esc(d.tools_since) + '</span>' : ''),
+        d.changes.toLocaleString(), (d.change_jobs ? "Ø " + Math.round(d.changes / d.change_jobs) + " per print · " : "") +
+        (d.indx_changes != null ? "INDX counter " + d.indx_changes.toLocaleString() : "from the print files"));
+    h += kpi("alert", d.low.length ? "var(--warn)" : "var(--ok)", "Low stock", d.low.length, "spools under " + d.low_g + " g", d.low.length ? "warn" : "");
+    h += '</div><div class="grid"><div class="panel"><h3>Used per week <small>last 8 weeks, by filament colour</small></h3>' + weeks(d) +
+      '</div><div class="panel"><h3>Materials</h3>' + donut(d) + '</div></div>';
+    h += '<div class="grid"><div class="panel"><h3>Most used</h3>' + (d.most.length ? d.most.map(function (m) {
+      return bar(m.label, m.g, d.most[0].g, m.colour, m.cost ? money(m.cost, cur) : ""); }).join("") : '<div class="empty">Nothing printed in this period.</div>') + '</div>';
+    h += '<div class="panel"><h3>Running low <small>under ' + d.low_g + ' g</small></h3>' + (d.low.length ? d.low.map(function (s) {
+      var c = s.pct < .25 ? "var(--bad)" : "var(--warn)";
+      return '<div class="br"><div class="n">' + sw(s.colour) + '<span class="lbl" title="' + esc(s.label) + '">' + esc(s.label) +
+        '</span></div><div class="track"><div class="fill" style="width:' + Math.max(2, 100 * s.pct).toFixed(1) + '%;background:' + c +
+        '"></div></div><div class="val">' + grams(s.g) + '</div></div>'; }).join("") : '<div class="empty">No spool under ' + d.low_g + ' g.</div>') + '</div></div>';
+    if (d.show_tools !== false) {
+      var tmax = Math.max.apply(null, d.tools.map(function (x) { return x.g; }).concat([0]));
+      h += '<div class="panel" style="margin-bottom:10px"><h3>Per tool <small>colour and name: spool assigned now' +
+        (d.tools_since ? ' · prints since ' + esc(d.tools_since) : '') + '</small></h3>' + (tmax > 0 ? d.tools.map(function (x) {
+          var m = /^T(\d+)(?: · (.*))?$/.exec(x.label) || [], tk = '<span class="tk">T' + (m[1] || "?") + '</span>';
+          return bar(m[2] || "no spool assigned", x.g, tmax, x.colour, x.prints + "×", tk); }).join("")
+        : '<div class="empty">Nothing printed in this period.</div>') + '</div>';
+    }
+    var st = { completed: "done", cancelled: "cancelled", error: "error", klippy_shutdown: "shutdown", klippy_disconnect: "disconnected", interrupted: "interrupted" };
+    h += '<div class="panel"><details class="hist"><summary><svg class="i chev"><use href="#i-chev"/></svg>Print history' +
+      '<span class="chip">' + d.history_count + ' prints · ' + grams(d.total_g) + '</span></summary><div class="tbl"><table>' +
+      '<tr><th>Date</th><th>Name</th><th>Filament</th><th>Status</th><th class="r">Used</th><th class="r">Cost</th></tr>' +
+      d.history.map(function (j) {
+        var dt = new Date(j.t * 1000);
+        return '<tr><td>' + dt.toLocaleDateString() + ' ' + dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) +
+          '</td><td>' + esc(j.name) + '</td><td><span class="sws">' + j.colours.map(sw).join("") + '</span></td><td><span class="st ' +
+          esc(j.status) + '">' + esc(st[j.status] || j.status) + '</span></td><td class="r">' + grams(j.g) + '</td><td class="r">' +
+          money(j.cost, cur) + '</td></tr>'; }).join("") + '</table></div>' +
+      (d.history_count > d.history.length ? '<div class="foot">Showing the newest ' + d.history.length + '.</div>' : '') + '</details></div>';
+    var notes = ["Grams per tool and tool changes per print are the slicer’s values; cancelled prints count with the printed share."];
+    if (d.unmatched) notes.push(d.unmatched + " prints used filament profiles without a Spoolman ID (SM<id>): counted with material and colour from the print file, without cost.");
+    if (d.show_tools !== false && d.indx_changes != null) notes.push("The INDX counter counts every real tool change since it was last reset.");
+    h += '<div class="foot">' + notes.map(esc).join("<br>") + '</div>';
+    $("stats").innerHTML = h;
+  }
   orca.onMessage(function (m) {
     if (!m) return;
-    if (m.type === "settings") {
-      if (document.activeElement && document.activeElement.form === f) return;  // do not overwrite typing
-      var s = m.settings;
-      for (var i = 0; i < f.elements.length; i++) {
-        var el = f.elements[i];
-        if (!el.name) continue;
-        if (el.type === "checkbox") el.checked = !!s[el.name]; else el.value = s[el.name] || "";
-      }
+    if (m.type === "ui") {
+      collapsed = m.collapsed || collapsed; period = m.period; apply();
+      if (!collapsed.stats && !loaded) loadStats();
     } else if (m.type === "status") {
-      var st = $("status");
-      st.textContent = (m.time ? m.time + "  " : "") + m.text;
-      st.className = m.ok === true ? "ok" : (m.ok === false ? "bad" : "");
+      var box = $("status"), chip = $("psub");
+      $("stext").textContent = m.text;
+      box.className = "status" + (m.ok === true ? " ok" : m.ok === false ? " bad" : "");
+      box.querySelector(".t").textContent = m.time ? "Last update " + m.time : "Status";
+      chip.className = "chip" + (m.ok === true ? " ok" : m.ok === false ? " bad" : "");
+      chip.innerHTML = m.busy ? "updating …" : m.time ? '<span class="pip"></span>' + (m.ok === false ? "error " : "up to date · ") + esc(m.time) : "not synced yet";
       $("sync").disabled = !!m.busy;
+    } else if (m.type === "stats") {
+      render(m);
     }
   });
-  $("sync").onclick = function () { $("sync").disabled = true; $("status").className = ""; $("status").textContent = "Updating ..."; orca.postMessage({type: "sync"}); };
-  $("browser").onclick = function () { orca.postMessage({type: "browser"}); };
-  f.addEventListener("submit", function (e) { e.preventDefault(); });
-  $("save").onclick = function () {
-    var s = {};
-    for (var i = 0; i < f.elements.length; i++) {
-      var el = f.elements[i];
-      if (el.name) s[el.name] = el.type === "checkbox" ? el.checked : el.value.trim();
-    }
-    if (document.activeElement) document.activeElement.blur();
-    orca.postMessage({type: "save", settings: s});
-    $("msg").textContent = "Saved.";
-  };
-  orca.postMessage({type: "ready"});
+  $("sync").onclick = function () { $("sync").disabled = true; $("stext").textContent = "Updating …"; $("status").className = "status"; orca.postMessage({ type: "sync" }); };
+  $("browser").onclick = function () { orca.postMessage({ type: "browser" }); };
+  Array.prototype.forEach.call($("period").children, function (b) {
+    b.onclick = function () { period = +b.dataset.p; apply(); saveUi(); loadStats(); };
+  });
+  $("reload").onclick = loadStats;
+  apply();
+  orca.postMessage({ type: "ready" });
 })();
 </script></body></html>"""
 
@@ -807,11 +1408,19 @@ or run the command "Update profiles from Spoolman".</small></p>
 </body></html>"""
 
 
+NOADDR_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><style>
+:root { color-scheme: light dark; } body { margin: 24px; font: 13px "Segoe UI", system-ui, sans-serif; }
+</style></head><body>
+<p>No Spoolman address set.</p>
+<p>Enter it in File &gt; Plugins &gt; Config &gt; Update profiles from Spoolman, then restart OrcaSlicer.</p>
+</body></html>"""
+
+
 def _tab_html() -> str:
     url = load_settings()["spoolman_url"]
     if url.startswith(("http://", "https://")):
         return REDIRECT_HTML.replace("__URL__", json.dumps(url).replace("</", "<\\/"))
-    return PANEL_HTML  # no address yet: show the settings right in the tab
+    return NOADDR_HTML
 
 
 CONFIG_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><style>
@@ -825,18 +1434,23 @@ small { opacity: .7; }
 </style></head><body>
 <form id="f">
 <label class="t"><span>Spoolman address</span><input type="text" name="spoolman_url" placeholder="http://spoolman.local:7912"></label>
+<label class="t"><span>Printer address (Moonraker, for the statistics)</span><input type="text" name="moonraker_url" placeholder="http://printer.local"></label>
+<label class="t"><span>Low stock below (g)</span><input type="text" name="low_stock_g" placeholder="100"></label>
+<label><input type="checkbox" name="show_tools"> Show per-tool statistics and tool changes (for tool changers)</label>
+<label class="t"><span>Tool statistics since (YYYY-MM-DD)</span><input type="text" name="tools_since" placeholder="e.g. 2026-11-09">
+<small>Date the tool changer was installed. Per-tool grams and tool changes ignore older prints; empty = all.</small></label>
 <label class="t"><span>Template prefix</span><input type="text" name="template_prefix" placeholder="SM-Vorlage">
 <small>Filament templates in Orca: "&lt;prefix&gt; &lt;Material&gt; ... @&lt;printer&gt; &lt;size&gt; nozzle".</small></label>
 <label><input type="checkbox" name="auto_sync"> Update automatically when OrcaSlicer starts</label>
 <label><input type="checkbox" name="spoolio_fallback"> Also read Spoolio's fields (flow_ratio, max_volumetric_speed, retraction_length, retraction_speed) as a fallback</label>
 <label><input type="checkbox" name="include_all"> Also archived filaments and filaments without a spool</label>
 <label>Layout (after restarting OrcaSlicer)<br><select name="layout">
-    <option value="two_tabs">Two tabs: Spoolman + Spoolman Profiles</option>
+    <option value="two_tabs">Two tabs: Spoolman + Spools &amp; Stats</option>
     <option value="spoolman_tab">Spoolman tab only (buttons: command "Update profiles from Spoolman")</option>
-    <option value="profiles_tab">Spoolman Profiles tab only (Spoolman opens in the browser)</option>
+    <option value="profiles_tab">Spools &amp; Stats tab only (Spoolman opens in the browser)</option>
   </select></label>
 <button type="button" id="save">Save</button><span id="msg"></span>
-<p><small>The same settings are in the Spoolman Profiles tab. Changes apply to the next update; the layout and the Spoolman tab address after restarting OrcaSlicer.</small></p>
+<p><small>Changes apply to the next update or refresh; the layout and the Spoolman tab address after restarting OrcaSlicer.</small></p>
 </form><script>
 (function () {
   var f = document.getElementById("f");
@@ -877,7 +1491,7 @@ INFO_CONFIG_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><style>
 </style></head><body>
 <p>This entry has no settings of its own.</p>
 <p>All settings of Spoolman Profiles are under the entry <b>Update profiles from Spoolman</b>
-(and in the Spoolman Profiles tab).</p>
+(and in the Spools &amp; Stats tab).</p>
 </body></html>"""
 
 
@@ -950,10 +1564,10 @@ if orca is not None:
             _ui_targets.pop("tab", None)
 
     class SpoolmanProfilesPage(_InfoConfig, orca.pages.PagesPluginCapabilityBase):
-        """Tab "Spoolman Profiles": update button, status and settings."""
+        """Tab "Spools & Stats": profile update and statistics."""
 
         def get_name(self):
-            return "Spoolman Profiles"
+            return "Spools & Stats"
 
         def get_type(self):
             return orca.PluginType.Pages
@@ -1009,17 +1623,17 @@ if orca is not None:
         def execute(self):
             if self.window is not None and self.window.is_open():
                 _post_status()
-                return orca.ExecutionResult.success("Spoolman Profiles is already open.")
+                return orca.ExecutionResult.success("Spools & Stats is already open.")
             self.window = orca.host.ui.create_window(
                 html=PANEL_HTML,
-                title="Spoolman Profiles",
+                title="Spools & Stats",
                 width=720,
                 height=560,
                 on_message=_handle_ui_message,
                 on_close=self._on_close,
             )
             _ui_targets["window"] = self.window.post
-            return orca.ExecutionResult.success("Spoolman Profiles opened.")
+            return orca.ExecutionResult.success("Spools & Stats opened.")
 
         def _on_close(self, *args):
             _ui_targets.pop("window", None)
@@ -1028,12 +1642,10 @@ if orca is not None:
     @orca.plugin
     class SpoolmanProfilesPlugin(orca.base):
         def register_capabilities(self):
-            url = load_settings()["spoolman_url"]
+            s = load_settings()
+            urls = [u for u in (s["spoolman_url"], s["moonraker_url"]) if u.startswith(("http://", "https://"))]
             try:
-                if url.startswith(("http://", "https://")):
-                    orca.request_permissions(threading=True, network=[url])
-                else:
-                    orca.request_permissions(threading=True)
+                orca.request_permissions(threading=True, network=urls)
             except Exception:  # noqa: BLE001
                 log.debug("request_permissions failed", exc_info=True)
             # Registration order is the order in File > Plugins > Config: settings entry first.
