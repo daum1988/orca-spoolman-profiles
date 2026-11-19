@@ -6,7 +6,7 @@
 # name = "Spoolman Profiles"
 # description = "Creates standalone OrcaSlicer filament profiles (filament ID PSM<id>) from Spoolman and shows the Spoolman web UI in a tab."
 # author = "indx-trident-350"
-# version = "1.0.0"
+# version = "1.1.0"
 # ///
 
 """Spoolman Profiles - OrcaSlicer 2.5 plugin for the Voron Trident 350 INDX setup.
@@ -55,7 +55,7 @@ except ImportError:  # pragma: no cover
     orca = None
 
 PLUGIN_NAME = "Spoolman Profiles"
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "1.1.0"
 BUNDLE_ID = "spoolman-profiles"
 ID_PREFIX = "PSM"
 TIMEOUT = 15
@@ -104,6 +104,10 @@ ICON_SVG = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="n
             'stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/>'
             '<path d="M12 3v6M12 15v6M3 12h6M15 12h6"/></svg>')
 
+PANEL_ICON_FILE = STATE_DIR / "panel_icon.svg"
+PANEL_ICON_SVG = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+                  'stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>')
+
 log = logging.getLogger("spoolman_profiles")
 log.setLevel(logging.INFO)
 log.propagate = False
@@ -121,27 +125,79 @@ def _setup_log() -> None:
         log.addHandler(logging.NullHandler())
 
 
-def load_settings() -> dict:
+# The same settings can be edited in three places: the Spoolman tab, and the config of each
+# capability in File > Plugins (Orca stores those itself and has no change callback). Every
+# copy carries "saved_at"; the newest one wins and is copied to the others.
+_caps: list = []  # capability instances, for get_config()/save_config()
+
+
+def _normalize(data: dict) -> dict:
     s = dict(DEFAULT_SETTINGS)
-    try:
-        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            s.update({k: data[k] for k in DEFAULT_SETTINGS if k in data})
-    except (OSError, ValueError):
-        pass
+    s.update({k: data[k] for k in DEFAULT_SETTINGS if k in data})
     s["spoolman_url"] = str(s["spoolman_url"] or "").strip().rstrip("/")
     s["template_prefix"] = str(s["template_prefix"] or "").strip() or DEFAULT_SETTINGS["template_prefix"]
     for k in ("auto_sync", "include_all", "spoolio_fallback"):
-        s[k] = bool(s[k])
+        v = s[k]
+        s[k] = v.strip().lower() in ("1", "true", "yes", "on") if isinstance(v, str) else bool(v)
+    try:
+        s["saved_at"] = float(data.get("saved_at") or 0)
+    except (TypeError, ValueError):
+        s["saved_at"] = 0.0
     return s
+
+
+def _cap_config(cap) -> dict | None:
+    try:
+        data = json.loads(cap.get_config())
+    except Exception:  # noqa: BLE001 - outside a host callback or never saved
+        return None
+    return data if isinstance(data, dict) and any(k in data for k in DEFAULT_SETTINGS) else None
+
+
+def _write_file(s: dict) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    SETTINGS_FILE.write_text(json.dumps(s, indent=2), encoding="utf-8")
+
+
+def _push_to_caps(s: dict) -> None:
+    for cap in list(_caps):
+        try:
+            if _cap_config(cap) != s:
+                cap.save_config(json.dumps(s))
+        except Exception:  # noqa: BLE001
+            log.debug("save_config failed", exc_info=True)
+
+
+def load_settings() -> dict:
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        file_s = _normalize(data if isinstance(data, dict) else {})
+    except (OSError, ValueError):
+        file_s = _normalize({})
+    best = file_s
+    for cap in list(_caps):
+        data = _cap_config(cap)
+        if data is not None:
+            c = _normalize(data)
+            if c["saved_at"] > best["saved_at"]:
+                best = c
+    if best is not file_s:  # changed in File > Plugins: copy to the file and the other capability
+        try:
+            _write_file(best)
+        except OSError:
+            log.warning("Could not write %s", SETTINGS_FILE)
+        _push_to_caps(best)
+    return best
 
 
 def save_settings(new: dict) -> dict:
     s = load_settings()
     s.update({k: new[k] for k in DEFAULT_SETTINGS if k in new})
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    SETTINGS_FILE.write_text(json.dumps(s, indent=2), encoding="utf-8")
-    return load_settings()
+    s["saved_at"] = time.time()
+    s = _normalize(s)
+    _write_file(s)
+    _push_to_caps(s)
+    return s
 
 
 # --------------------------------------------------------------------------- profile generation (1:1 port of the .ps1)
@@ -398,7 +454,7 @@ def fetch_spoolman(url: str) -> tuple[list, list]:
 # --------------------------------------------------------------------------- Orca side
 
 _lock = threading.Lock()
-_state = {"time": "", "text": "Not synced yet.", "ok": None, "page": None, "pending": None}
+_state = {"time": "", "text": "Not synced yet.", "ok": None}
 
 
 def _bundle():
@@ -569,15 +625,46 @@ def _notify(text: str, warning: bool = False) -> None:
         log.info("Notification not shown: %s", text)
 
 
+_ui_targets: dict = {}  # name -> post(dict) of an open plugin page or window
+
+
+def _post(msg: dict) -> None:
+    for name, post in list(_ui_targets.items()):
+        try:
+            post(msg)
+        except Exception:  # noqa: BLE001
+            log.debug("post to %s failed", name, exc_info=True)
+
+
 def _post_status() -> None:
-    page = _state.get("page")
-    if page is None:
+    if not _ui_targets:
         return
+    _post({"type": "settings", "settings": load_settings()})  # may have changed in File > Plugins
+    _post({"type": "status", "time": _state["time"], "text": _state["text"], "ok": _state["ok"],
+           "busy": _lock.locked()})
+
+
+def _handle_ui_message(data) -> None:
+    """Messages from the control panel (window or tab)."""
     try:
-        page.post_message({"type": "status", "time": _state["time"], "text": _state["text"], "ok": _state["ok"],
-                           "busy": _lock.locked()})
+        if isinstance(data, str):
+            data = json.loads(data)
+        if not isinstance(data, dict):
+            return
+        t = data.get("type")
+        if t == "ready":
+            _post_status()
+        elif t == "sync":
+            _bg(_sync_and_notify, "button")
+        elif t == "save":
+            save_settings(data.get("settings") or {})
+            _post_status()
+        elif t == "browser":
+            u = load_settings()["spoolman_url"]
+            if u.startswith(("http://", "https://")):
+                _bg(webbrowser.open, u)
     except Exception:  # noqa: BLE001
-        log.debug("post_message failed", exc_info=True)
+        log.exception("UI message failed")
 
 
 def _bg(fn, *args) -> None:
@@ -622,63 +709,52 @@ def _startup_sync() -> None:
     log.warning("Startup sync gave up: OrcaSlicer was not ready")
 
 
-PAGE_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><style>
+PANEL_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><style>
 :root { color-scheme: light dark; --b: rgba(127,127,127,.35); --ok: #2e9d57; --bad: #c0392b; --acc: #009688; }
-html, body { height: 100%; margin: 0; font: 13px "Segoe UI", system-ui, sans-serif; }
-body { display: flex; flex-direction: column; }
-#bar { display: flex; gap: 8px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--b); flex-wrap: wrap; }
+html, body { margin: 0; font: 13px "Segoe UI", system-ui, sans-serif; }
+#bar { display: flex; gap: 8px; align-items: center; padding: 10px; border-bottom: 1px solid var(--b); flex-wrap: wrap; }
 button { font: inherit; padding: 5px 12px; border-radius: 4px; border: 1px solid var(--b); background: transparent; color: inherit; cursor: pointer; }
 button.main { background: var(--acc); border-color: var(--acc); color: #fff; font-weight: 600; }
 button:disabled { opacity: .5; cursor: default; }
-#status { flex: 1; min-width: 200px; white-space: pre-wrap; max-height: 6.5em; overflow: auto; }
+#status { padding: 10px; white-space: pre-wrap; border-bottom: 1px solid var(--b); min-height: 3em; }
 #status.ok { color: var(--ok); } #status.bad { color: var(--bad); }
-#settings { display: none; padding: 10px; border-bottom: 1px solid var(--b); }
-#settings.open { display: block; }
+#settings { padding: 10px; }
+#settings h3 { margin: 0 0 10px; font-size: 13px; }
 #settings label { display: block; margin: 0 0 8px; }
-#settings input[type=text] { width: min(520px, 100%); box-sizing: border-box; padding: 4px; font: inherit; }
-#frame { flex: 1; border: 0; width: 100%; }
-#empty { flex: 1; display: none; align-items: center; justify-content: center; opacity: .7; }
-small { opacity: .7; }
+#settings input[type=text] { width: 100%; box-sizing: border-box; padding: 4px; font: inherit; }
+small, #msg { opacity: .75; }
 </style></head><body>
 <div id="bar">
   <button class="main" id="sync">Update profiles from Spoolman</button>
-  <button id="reload" title="Reload the Spoolman page">&#x21bb;</button>
-  <button id="browser">Open in browser</button>
-  <button id="gear">Settings</button>
-  <div id="status">Not synced yet.</div>
+  <button id="browser">Open Spoolman in browser</button>
 </div>
+<div id="status">Not synced yet.</div>
 <form id="settings">
+  <h3>Settings</h3>
   <label>Spoolman address<br><input type="text" name="spoolman_url" placeholder="http://spoolman.local:7912"></label>
   <label>Template prefix<br><input type="text" name="template_prefix"><br>
     <small>Filament templates in Orca are named "&lt;prefix&gt; &lt;Material&gt; ... @&lt;printer&gt; &lt;size&gt; nozzle".</small></label>
   <label><input type="checkbox" name="auto_sync"> Update automatically when OrcaSlicer starts</label>
   <label><input type="checkbox" name="spoolio_fallback"> Also read Spoolio's fields (flow_ratio, max_volumetric_speed, retraction_length, retraction_speed) as a fallback</label>
   <label><input type="checkbox" name="include_all"> Also archived filaments and filaments without a spool</label>
-  <button class="main" type="submit">Save</button> <button type="button" id="cancel">Close</button>
+  <button class="main" type="button" id="save">Save</button> <span id="msg"></span>
+  <p><small>Same settings as in File &gt; Plugins &gt; Spoolman Profiles &gt; Config. After changing the address,
+  restart OrcaSlicer so the Spoolman tab loads it.</small></p>
 </form>
-<iframe id="frame"></iframe>
-<div id="empty">Enter the Spoolman address under Settings.</div>
 <script>
 (function () {
   var $ = function (id) { return document.getElementById(id); };
-  var f = $("settings"), url = "";
-  function show(u) {
-    url = u || "";
-    $("frame").style.display = url ? "block" : "none";
-    $("empty").style.display = url ? "none" : "flex";
-    if (url && $("frame").getAttribute("src") !== url) $("frame").setAttribute("src", url);
-  }
+  var f = $("settings");
   orca.onMessage(function (m) {
     if (!m) return;
     if (m.type === "settings") {
+      if (document.activeElement && document.activeElement.form === f) return;  // do not overwrite typing
       var s = m.settings;
       for (var i = 0; i < f.elements.length; i++) {
         var el = f.elements[i];
         if (!el.name) continue;
         if (el.type === "checkbox") el.checked = !!s[el.name]; else el.value = s[el.name] || "";
       }
-      show(s.spoolman_url);
-      if (!s.spoolman_url) f.classList.add("open");
     } else if (m.type === "status") {
       var st = $("status");
       st.textContent = (m.time ? m.time + "  " : "") + m.text;
@@ -687,33 +763,124 @@ small { opacity: .7; }
     }
   });
   $("sync").onclick = function () { $("sync").disabled = true; $("status").className = ""; $("status").textContent = "Updating ..."; orca.postMessage({type: "sync"}); };
-  $("reload").onclick = function () { if (url) $("frame").setAttribute("src", url); };
   $("browser").onclick = function () { orca.postMessage({type: "browser"}); };
-  $("gear").onclick = function () { f.classList.toggle("open"); };
-  $("cancel").onclick = function () { f.classList.remove("open"); };
-  f.addEventListener("submit", function (e) {
-    e.preventDefault();
+  f.addEventListener("submit", function (e) { e.preventDefault(); });
+  $("save").onclick = function () {
     var s = {};
     for (var i = 0; i < f.elements.length; i++) {
       var el = f.elements[i];
       if (el.name) s[el.name] = el.type === "checkbox" ? el.checked : el.value.trim();
     }
+    if (document.activeElement) document.activeElement.blur();
     orca.postMessage({type: "save", settings: s});
-    f.classList.remove("open");
-  });
+    $("msg").textContent = "Saved.";
+  };
   orca.postMessage({type: "ready"});
+})();
+</script></body></html>"""
+
+# The tab navigates to Spoolman itself instead of framing it: inside an iframe under Orca's
+# file:// page, Spoolman counts as third party, its localStorage access throws and SvelteKit
+# shows "500 Internal Error".
+REDIRECT_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><style>
+:root { color-scheme: light dark; } body { margin: 24px; font: 13px "Segoe UI", system-ui, sans-serif; }
+small { opacity: .75; }
+</style></head><body>
+<p>Loading Spoolman from <a id="u"></a> ...</p>
+<p><small>If nothing appears, check the address: File &gt; Plugins &gt; Spoolman Profiles &gt; Config,
+or run the command "Update profiles from Spoolman".</small></p>
+<script>var u = __URL__; var a = document.getElementById("u"); a.textContent = u; a.href = u; location.replace(u);</script>
+</body></html>"""
+
+
+def _tab_html() -> str:
+    url = load_settings()["spoolman_url"]
+    if url.startswith(("http://", "https://")):
+        return REDIRECT_HTML.replace("__URL__", json.dumps(url).replace("</", "<\\/"))
+    return PANEL_HTML  # no address yet: show the settings right in the tab
+
+
+CONFIG_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><style>
+:root { color-scheme: light dark; font: 13px "Segoe UI", system-ui, sans-serif; }
+body { margin: 0; padding: 14px; }
+label { display: block; margin: 0 0 10px; }
+label.t span { display: block; margin-bottom: 3px; font-weight: 600; }
+input[type=text] { width: 100%; box-sizing: border-box; padding: 5px; font: inherit; }
+small { opacity: .7; }
+#msg { margin-left: 8px; opacity: .8; }
+</style></head><body>
+<form id="f">
+<label class="t"><span>Spoolman address</span><input type="text" name="spoolman_url" placeholder="http://spoolman.local:7912"></label>
+<label class="t"><span>Template prefix</span><input type="text" name="template_prefix" placeholder="SM-Vorlage">
+<small>Filament templates in Orca: "&lt;prefix&gt; &lt;Material&gt; ... @&lt;printer&gt; &lt;size&gt; nozzle".</small></label>
+<label><input type="checkbox" name="auto_sync"> Update automatically when OrcaSlicer starts</label>
+<label><input type="checkbox" name="spoolio_fallback"> Also read Spoolio's fields (flow_ratio, max_volumetric_speed, retraction_length, retraction_speed) as a fallback</label>
+<label><input type="checkbox" name="include_all"> Also archived filaments and filaments without a spool</label>
+<button type="button" id="save">Save</button><span id="msg"></span>
+<p><small>The same settings are in the Spoolman tab (Settings). Changes apply to the next update.</small></p>
+</form><script>
+(function () {
+  var f = document.getElementById("f");
+  function fill(cfg) {
+    if (typeof cfg === "string") { try { cfg = JSON.parse(cfg); } catch (e) { cfg = {}; } }
+    cfg = cfg || {};
+    for (var i = 0; i < f.elements.length; i++) {
+      var el = f.elements[i];
+      if (!el.name || !(el.name in cfg)) continue;
+      if (el.type === "checkbox") el.checked = !!cfg[el.name]; else el.value = cfg[el.name] || "";
+    }
+  }
+  if (window.orca && typeof orca.onConfig === "function") orca.onConfig(fill);
+  if (window.orca && typeof orca.getConfig === "function") {
+    try { var r = orca.getConfig(); if (r && typeof r.then === "function") r.then(fill); else if (r) fill(r); } catch (e) {}
+  }
+  // The Plugins dialog sandboxes this page without allow-forms: a form submit never fires,
+  // so Save is a plain button.
+  f.addEventListener("submit", function (e) { e.preventDefault(); });
+  document.getElementById("save").addEventListener("click", function () {
+    var cfg = {};
+    for (var i = 0; i < f.elements.length; i++) {
+      var el = f.elements[i];
+      if (el.name) cfg[el.name] = el.type === "checkbox" ? el.checked : el.value.trim();
+    }
+    cfg.saved_at = Date.now() / 1000;
+    orca.saveConfig(cfg);
+    document.getElementById("msg").textContent = "Saved.";
+  });
 })();
 </script></body></html>"""
 
 
 if orca is not None:
 
-    class SpoolmanPage(orca.pages.PagesPluginCapabilityBase):
-        """Tab "Spoolman": update button, settings and the Spoolman web UI."""
+    class _SettingsConfig:
+        """The plugin's settings as this capability's config in File > Plugins."""
+
+        def has_config_ui(self):
+            return True
+
+        def get_config_ui(self):
+            return CONFIG_HTML
+
+        def get_default_config(self):
+            return {**DEFAULT_SETTINGS, "saved_at": time.time()}
+
+        def _register_config(self):
+            if self not in _caps:
+                _caps.append(self)
+
+        def _sync_config(self):
+            try:
+                _push_to_caps(load_settings())
+            except Exception:  # noqa: BLE001
+                log.debug("config sync failed", exc_info=True)
+
+    class SpoolmanPage(_SettingsConfig, orca.pages.PagesPluginCapabilityBase):
+        """Tab "Spoolman": the Spoolman web UI (or the settings while no address is set)."""
 
         def __init__(self):
             super().__init__()
-            _state["page"] = self
+            self._register_config()
 
         def get_name(self):
             return "Spoolman"
@@ -731,37 +898,65 @@ if orca is not None:
                 return ""
 
         def get_ui(self):
-            return PAGE_HTML
+            html = _tab_html()
+            if html is PANEL_HTML:
+                _ui_targets["tab"] = self.post_message
+            else:
+                _ui_targets.pop("tab", None)
+            return html
 
         def on_message(self, arg0):
-            try:
-                data = json.loads(arg0) if isinstance(arg0, str) else arg0
-                if not isinstance(data, dict):
-                    return
-                t = data.get("type")
-                if t == "ready":
-                    self.post_message({"type": "settings", "settings": load_settings()})
-                    _post_status()
-                elif t == "sync":
-                    _bg(_sync_and_notify, "button")
-                elif t == "save":
-                    s = save_settings(data.get("settings") or {})
-                    self.post_message({"type": "settings", "settings": s})
-                elif t == "browser":
-                    u = load_settings()["spoolman_url"]
-                    if u.startswith(("http://", "https://")):
-                        _bg(webbrowser.open, u)
-            except Exception:  # noqa: BLE001
-                log.exception("on_message failed")
+            _handle_ui_message(arg0)
 
         def on_load(self):
             _setup_log()
+            self._sync_config()
 
         def on_unload(self):
-            _state["page"] = None
+            _ui_targets.pop("tab", None)
 
-    class SpoolmanProfilesScript(orca.script.ScriptPluginCapabilityBase):
+    class SpoolmanProfilesPage(_SettingsConfig, orca.pages.PagesPluginCapabilityBase):
+        """Tab "Spoolman Profiles": update button, status and settings."""
+
+        def __init__(self):
+            super().__init__()
+            self._register_config()
+
+        def get_name(self):
+            return "Spoolman Profiles"
+
+        def get_type(self):
+            return orca.PluginType.Pages
+
+        def get_icon(self):
+            try:
+                if not PANEL_ICON_FILE.is_file():
+                    STATE_DIR.mkdir(parents=True, exist_ok=True)
+                    PANEL_ICON_FILE.write_text(PANEL_ICON_SVG, encoding="utf-8")
+                return str(PANEL_ICON_FILE)
+            except OSError:
+                return ""
+
+        def get_ui(self):
+            _ui_targets["panel_tab"] = self.post_message
+            return PANEL_HTML
+
+        def on_message(self, arg0):
+            _handle_ui_message(arg0)
+
+        def on_load(self):
+            _setup_log()
+            self._sync_config()
+
+        def on_unload(self):
+            _ui_targets.pop("panel_tab", None)
+
+    class SpoolmanProfilesScript(_SettingsConfig, orca.script.ScriptPluginCapabilityBase):
         """Command "Update profiles from Spoolman" (Plugins dialog / command palette) and startup sync."""
+
+        def __init__(self):
+            super().__init__()
+            self._register_config()
 
         def get_name(self):
             return "Update profiles from Spoolman"
@@ -769,11 +964,29 @@ if orca is not None:
         def on_load(self):
             _setup_log()
             log.info("%s %s loaded", PLUGIN_NAME, PLUGIN_VERSION)
+            self._sync_config()
             _bg(_startup_sync)
 
+        window = None
+
         def execute(self):
-            _bg(_sync_and_notify, "command")
-            return orca.ExecutionResult.success("Updating filament profiles from Spoolman ...")
+            if self.window is not None and self.window.is_open():
+                _post_status()
+                return orca.ExecutionResult.success("Spoolman Profiles is already open.")
+            self.window = orca.host.ui.create_window(
+                html=PANEL_HTML,
+                title="Spoolman Profiles",
+                width=720,
+                height=560,
+                on_message=_handle_ui_message,
+                on_close=self._on_close,
+            )
+            _ui_targets["window"] = self.window.post
+            return orca.ExecutionResult.success("Spoolman Profiles opened.")
+
+        def _on_close(self, *args):
+            _ui_targets.pop("window", None)
+            self.window = None
 
     @orca.plugin
     class SpoolmanProfilesPlugin(orca.base):
@@ -787,4 +1000,5 @@ if orca is not None:
             except Exception:  # noqa: BLE001
                 log.debug("request_permissions failed", exc_info=True)
             orca.register_capability(SpoolmanPage)
+            orca.register_capability(SpoolmanProfilesPage)
             orca.register_capability(SpoolmanProfilesScript)
