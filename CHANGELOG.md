@@ -3,6 +3,13 @@
 Each section is the text OrcaSlicer shows as the release's changelog.
 The newest version is at the top; keep the heading format `## [x.y.z] - YYYY-MM-DD`.
 
+## [1.7.0] - 2026-11-20
+
+### Added
+- Print history: link to the **timelapse** of a print (moonraker-timelapse),
+  with thumbnail. The video plays right in the tab; "Open in browser" is in the
+  player.
+
 ## [1.6.0] - 2026-11-19
 
 ### Changed

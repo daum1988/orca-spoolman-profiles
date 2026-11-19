@@ -6,7 +6,7 @@
 # name = "Spoolman Profiles"
 # description = "Creates standalone OrcaSlicer filament profiles (filament ID PSM<id>) from Spoolman and shows the Spoolman web UI in a tab."
 # author = "indx-trident-350"
-# version = "1.6.0"
+# version = "1.7.0"
 # ///
 
 """Spoolman Profiles - OrcaSlicer 2.5 plugin for the Voron Trident 350 INDX setup.
@@ -45,6 +45,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -59,7 +60,7 @@ except ImportError:  # pragma: no cover
     orca = None
 
 PLUGIN_NAME = "Spoolman Profiles"
-PLUGIN_VERSION = "1.6.0"
+PLUGIN_VERSION = "1.7.0"
 BUNDLE_ID = "spoolman-profiles"
 ID_PREFIX = "PSM"
 TIMEOUT = 15
@@ -566,7 +567,7 @@ def compact_job(j: dict) -> dict | None:
         weights = _floats([m.get("filament_weight_total")]) if m.get("filament_weight_total") else []
     try:
         return {"id": str(j.get("job_id")), "name": str(j.get("filename") or ""),
-                "start": float(j.get("start_time") or 0), "status": status,
+                "start": float(j.get("start_time") or 0), "end": float(j.get("end_time") or 0), "status": status,
                 "used_mm": float(j.get("filament_used") or 0), "total_mm": float(m.get("filament_total") or 0),
                 "weights": weights, "changes": changes, "names": _jlist(m.get("filament_name")),
                 "types": _jlist(m.get("filament_type")), "colors": _jlist(m.get("filament_colors"))}
@@ -619,6 +620,50 @@ def printer_totals(base: str) -> dict:
         return _http_json(f"{base}/server/history/totals")["result"]["job_totals"] or {}
     except Exception:  # noqa: BLE001 - optional
         return {}
+
+
+TIMELAPSE_RE = re.compile(r"^timelapse_(.+)_(\d{8}_\d{4})\.(mp4|gif|jpg)$")
+
+
+def fetch_timelapses(base: str) -> list[dict]:
+    """Rendered timelapse videos on the printer; [] without moonraker-timelapse."""
+    try:
+        files = _http_json(f"{base}/server/files/list?root=timelapse")["result"]
+    except Exception:  # noqa: BLE001 - optional
+        return []
+    out: dict = {}
+    for f in files if isinstance(files, list) else []:
+        name = str(f.get("path") or f.get("filename") or "")
+        m = TIMELAPSE_RE.match(name)
+        if not m:
+            continue
+        try:
+            ts = time.mktime(time.strptime(m.group(2), "%Y%m%d_%H%M"))
+        except ValueError:
+            continue
+        e = out.setdefault((m.group(1), m.group(2)), {"gcode": m.group(1), "ts": ts})
+        e["thumb" if m.group(3) == "jpg" else "video"] = name
+    return [e for e in out.values() if e.get("video")]
+
+
+def attach_timelapses(hist: list, videos: list, base: str) -> None:
+    """Link each print to the video rendered for it (same G-code file, rendered after its start)."""
+    url = lambda n: f"{base}/server/files/timelapse/{urllib.parse.quote(n)}"  # noqa: E731
+    by_file: dict = {}
+    for v in videos:
+        by_file.setdefault(v["gcode"], []).append(v)
+    used: set = set()
+    for h in sorted(hist, key=lambda x: x["t"]):
+        end = h.get("end") or h["t"]
+        cands = [v for v in by_file.get(h.get("file"), [])
+                 if v["video"] not in used and h["t"] - 60 <= v["ts"] <= end + 3600]
+        if not cands:
+            continue
+        v = min(cands, key=lambda v: abs(v["ts"] - end))
+        used.add(v["video"])
+        h["timelapse"] = url(v["video"])
+        if v.get("thumb"):
+            h["thumb"] = url(v["thumb"])
 
 
 def spoolman_currency(url: str) -> str:
@@ -725,7 +770,8 @@ def compute_stats(jobs: list, filaments: list, spools: list, days: int, low_g: i
             u["g"] += r["g"]
             u["cost"] += r["cost"] or 0.0
             mats[r["material"]] = mats.get(r["material"], 0.0) + r["g"]
-        hist.append({"t": job["start"], "name": re.sub(r"\.gcode$", "", job["name"].split("/")[-1]),
+        hist.append({"t": job["start"], "end": job.get("end") or 0.0, "file": job["name"].split("/")[-1],
+                     "name": re.sub(r"\.gcode$", "", job["name"].split("/")[-1]),
                      "status": job["status"], "g": jg, "cost": sum(jc) if jc else None,
                      "colours": [r["colour"] for r in rows]})
 
@@ -795,6 +841,11 @@ def _stats_and_post(period) -> None:
         d = compute_stats(jobs, filaments, spools, period, s["low_stock_g"], spoolman_currency(s["spoolman_url"]),
                           variables=printer_variables(s["moonraker_url"]), tools_since=s["tools_since"],
                           totals=printer_totals(s["moonraker_url"]))
+        attach_timelapses(d["history"], fetch_timelapses(s["moonraker_url"]), s["moonraker_url"])
+        for h in d["history"]:
+            h.pop("file", None)
+            h.pop("end", None)
+        d["timelapses"] = sum(1 for h in d["history"] if h.get("timelapse"))
         d.update(type="stats", period=period, time=time.strftime("%H:%M"), show_tools=s["show_tools"])
     except urllib.error.URLError as exc:
         d = {"type": "stats", "error": f"Not reachable: {getattr(exc, 'reason', exc)}"}
@@ -1016,6 +1067,10 @@ def _handle_ui_message(data) -> None:
             _bg(_stats_and_post, data.get("period"))
         elif t == "ui":
             save_ui(data)
+        elif t == "open":
+            u, base = str(data.get("url") or ""), load_settings()["moonraker_url"]
+            if base and u.startswith(base + "/server/files/timelapse/"):
+                _bg(webbrowser.open, u)
         elif t == "browser":
             u = load_settings()["spoolman_url"]
             if u.startswith(("http://", "https://")):
@@ -1191,6 +1246,19 @@ th { position: sticky; top: 0; background: var(--bg, Canvas); font-weight: 600; 
 tr:nth-child(even) td { background: var(--surf); }
 td.r, th.r { text-align: right; white-space: nowrap; }
 td .sws { display: flex; gap: 3px; }
+a.tl { display: inline-flex; align-items: center; gap: 6px; color: var(--acc); text-decoration: none; cursor: pointer;
+  white-space: nowrap; }
+a.tl:hover { text-decoration: underline; }
+a.tl img { width: 44px; height: 25px; object-fit: cover; border-radius: 4px; box-shadow: 0 0 0 1px var(--line); }
+a.tl .play { width: 14px; height: 14px; }
+.modal { position: fixed; inset: 0; background: rgba(0,0,0,.72); display: none; align-items: center; justify-content: center;
+  z-index: 50; padding: 24px; }
+.modal.on { display: flex; }
+.modal .box { width: min(1100px, 100%); background: var(--bg, Canvas); border-radius: 12px; overflow: hidden;
+  box-shadow: 0 20px 60px rgba(0,0,0,.5); }
+.modal .bar { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.modal .bar b { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.modal video { display: block; width: 100%; max-height: 75vh; background: #000; }
 .st { font-size: 11.5px; padding: 1px 8px; border-radius: 99px; background: var(--surf2); white-space: nowrap; }
 .st.completed { background: rgba(46,157,87,.16); color: var(--ok); }
 .st.error, .st.klippy_shutdown, .st.klippy_disconnect { background: rgba(214,69,69,.16); color: var(--bad); }
@@ -1207,6 +1275,7 @@ td .sws { display: flex; gap: 3px; }
   <symbol id="i-print" viewBox="0 0 24 24"><path d="M4 20h16M6 20V9l6-5 6 5v11"/><path d="M10 20v-6h4v6"/></symbol>
   <symbol id="i-coin" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M15 9.5a3 3 0 1 0 0 5M8 11h5M8 13h5"/></symbol>
   <symbol id="i-swap" viewBox="0 0 24 24"><path d="M7 7h11l-3-3M17 17H6l3 3"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M10 9l5 3-5 3z"/></symbol>
   <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3l9 16H3z"/><path d="M12 10v4M12 17h.01"/></symbol>
 </svg>
 
@@ -1237,6 +1306,10 @@ td .sws { display: flex; gap: 3px; }
     <div id="stats"><div class="empty" style="margin-top:12px">Loading …</div></div>
   </div>
 </section>
+
+<div class="modal" id="modal"><div class="box"><div class="bar"><b id="mtitle"></b>
+  <button id="mopen"><svg class="i"><use href="#i-ext"/></svg>Open in browser</button><button id="mclose">Close</button></div>
+  <video id="mvideo" controls playsinline></video></div></div>
 
 <div class="foot">Settings: File › Plugins › Config › Update profiles from Spoolman.</div>
 
@@ -1351,14 +1424,18 @@ td .sws { display: flex; gap: 3px; }
     }
     var st = { completed: "done", cancelled: "cancelled", error: "error", klippy_shutdown: "shutdown", klippy_disconnect: "disconnected", interrupted: "interrupted" };
     h += '<div class="panel"><details class="hist"><summary><svg class="i chev"><use href="#i-chev"/></svg>Print history' +
-      '<span class="chip">' + d.history_count + ' prints · ' + grams(d.total_g) + '</span></summary><div class="tbl"><table>' +
-      '<tr><th>Date</th><th>Name</th><th>Filament</th><th>Status</th><th class="r">Used</th><th class="r">Cost</th></tr>' +
+      '<span class="chip">' + d.history_count + ' prints · ' + grams(d.total_g) + '</span>' +
+      (d.timelapses ? '<span class="chip">' + d.timelapses + ' timelapses</span>' : '') + '</summary><div class="tbl"><table>' +
+      '<tr><th>Date</th><th>Name</th><th>Filament</th><th>Status</th><th class="r">Used</th><th class="r">Cost</th>' +
+      (d.timelapses ? '<th>Timelapse</th>' : '') + '</tr>' +
       d.history.map(function (j) {
         var dt = new Date(j.t * 1000);
         return '<tr><td>' + dt.toLocaleDateString() + ' ' + dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) +
           '</td><td>' + esc(j.name) + '</td><td><span class="sws">' + j.colours.map(sw).join("") + '</span></td><td><span class="st ' +
           esc(j.status) + '">' + esc(st[j.status] || j.status) + '</span></td><td class="r">' + grams(j.g) + '</td><td class="r">' +
-          money(j.cost, cur) + '</td></tr>'; }).join("") + '</table></div>' +
+          money(j.cost, cur) + '</td>' + (d.timelapses ? '<td>' + (j.timelapse ? '<a class="tl" data-url="' + esc(j.timelapse) + '" data-name="' + esc(j.name) +
+          '" title="Play the timelapse">' + (j.thumb ? '<img src="' + esc(j.thumb) + '" alt="">' : '') +
+          '<svg class="i play"><use href="#i-play"/></svg>Video</a>' : '') + '</td>' : '') + '</tr>'; }).join("") + '</table></div>' +
       (d.history_count > d.history.length ? '<div class="foot">Showing the newest ' + d.history.length + '.</div>' : '') + '</details></div>';
     var notes = ["Grams per tool and tool changes per print are the slicer’s values; cancelled prints count with the printed share."];
     if (d.unmatched) notes.push(d.unmatched + " prints used filament profiles without a Spoolman ID (SM<id>): counted with material and colour from the print file, without cost.");
@@ -1389,6 +1466,20 @@ td .sws { display: flex; gap: 3px; }
     b.onclick = function () { period = +b.dataset.p; apply(); saveUi(); loadStats(); };
   });
   $("reload").onclick = loadStats;
+  $("stats").addEventListener("click", function (e) {
+    var a = e.target.closest ? e.target.closest("a.tl") : null;
+    if (!a) return;
+    e.preventDefault();
+    var v = $("mvideo");
+    $("mtitle").textContent = a.getAttribute("data-name") || "Timelapse";
+    $("mopen").setAttribute("data-url", a.getAttribute("data-url"));
+    v.src = a.getAttribute("data-url"); $("modal").classList.add("on"); v.play().catch(function () {});
+  });
+  function closeModal() { var v = $("mvideo"); v.pause(); v.removeAttribute("src"); v.load(); $("modal").classList.remove("on"); }
+  $("mclose").onclick = closeModal;
+  $("modal").addEventListener("click", function (e) { if (e.target === $("modal")) closeModal(); });
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeModal(); });
+  $("mopen").onclick = function () { orca.postMessage({ type: "open", url: $("mopen").getAttribute("data-url") }); };
   apply();
   orca.postMessage({ type: "ready" });
 })();
