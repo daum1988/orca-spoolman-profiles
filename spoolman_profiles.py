@@ -28,6 +28,10 @@ optional nozzle suffix (_d025/_d04/_d06) that wins for the matching variant.
 Spoolio's field names (flow_ratio, max_volumetric_speed, retraction_length,
 retraction_speed) are read as a fallback when enabled.
 
+Developed with the help of AI (Anthropic's Claude) as part of the author's first
+project; so far only tested on the author's printer (Voron Trident 350 INDX,
+OrcaSlicer 2.5.1). Repository: https://github.com/daum1988/indx-trident-350
+
 Install: put this file into %APPDATA%\\OrcaSlicer\\orca_plugins\\spoolman_profiles\\,
 restart Orca, File > Plugins, tick Activate.
 """
