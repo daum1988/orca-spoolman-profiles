@@ -6,7 +6,7 @@
 # name = "Spoolman Profiles"
 # description = "Creates standalone OrcaSlicer filament profiles (filament ID PSM<id>) from Spoolman and shows the Spoolman web UI in a tab."
 # author = "indx-trident-350"
-# version = "1.9.0"
+# version = "1.10.0"
 # ///
 
 """Spoolman Profiles - OrcaSlicer 2.5 plugin for the Voron Trident 350 INDX setup.
@@ -61,7 +61,7 @@ except ImportError:  # pragma: no cover
     orca = None
 
 PLUGIN_NAME = "Spoolman Profiles"
-PLUGIN_VERSION = "1.9.0"
+PLUGIN_VERSION = "1.10.0"
 BUNDLE_ID = "spoolman-profiles"
 ID_PREFIX = "PSM"
 TIMEOUT = 15
@@ -74,6 +74,8 @@ DEFAULT_SETTINGS = {
     "show_tools": True,
     "template_prefix": "SM-Vorlage",
     "name_format": "{vendor} {material} {name}",
+    "link_label": "",
+    "link_url": "",
     "auto_sync": True,
     "include_all": False,
     "layout": "two_tabs",
@@ -161,6 +163,8 @@ def _normalize(data: dict) -> dict:
         s["low_stock_g"] = DEFAULT_SETTINGS["low_stock_g"]
     s["template_prefix"] = str(s["template_prefix"] or "").strip() or DEFAULT_SETTINGS["template_prefix"]
     nf = str(s["name_format"] or "").strip()
+    s["link_label"] = str(s["link_label"] or "").strip()[:40]
+    s["link_url"] = str(s["link_url"] or "").strip()
     s["name_format"] = nf if any(k in nf for k in ("{vendor}", "{material}", "{name}")) else DEFAULT_SETTINGS["name_format"]
     if s["layout"] not in LAYOUTS:
         s["layout"] = DEFAULT_SETTINGS["layout"]
@@ -1083,6 +1087,12 @@ def _post_status() -> None:
            "busy": _lock.locked()})
 
 
+def extra_link(s: dict) -> str:
+    """The configured extra link with {printer} replaced; "" when unset or not http(s)."""
+    u = s["link_url"].replace("{printer}", s["moonraker_url"]).replace("{spoolman}", s["spoolman_url"])
+    return u if u.startswith(("http://", "https://")) else ""
+
+
 def _handle_ui_message(data) -> None:
     """Messages from the Spools & Stats page (tab or window)."""
     try:
@@ -1103,6 +1113,10 @@ def _handle_ui_message(data) -> None:
         elif t == "open":
             u, base = str(data.get("url") or ""), load_settings()["moonraker_url"]
             if base and u.startswith(base + "/server/files/timelapse/"):
+                _bg(webbrowser.open, u)
+        elif t == "link":
+            u = extra_link(load_settings())
+            if u:
                 _bg(webbrowser.open, u)
         elif t == "browser":
             u = load_settings()["spoolman_url"]
@@ -1320,6 +1334,7 @@ a.tl .play { width: 14px; height: 14px; }
     <div class="row">
       <button class="primary" id="sync"><svg class="i"><use href="#i-sync"/></svg>Update profiles from Spoolman</button>
       <button id="browser"><svg class="i"><use href="#i-ext"/></svg>Open Spoolman in browser</button>
+      <button id="xlink" style="display:none"><svg class="i"><use href="#i-ext"/></svg><span></span></button>
     </div>
     <div class="status" id="status"><div class="t">Status</div><div id="stext">Not synced yet.</div></div>
   </div>
@@ -1490,7 +1505,12 @@ a.tl .play { width: 14px; height: 14px; }
   }
   orca.onMessage(function (m) {
     if (!m) return;
-    if (m.type === "ui") {
+    if (m.type === "settings") {
+      var s = m.settings || {}, b = $("xlink"), on = !!(s.link_url && s.link_label);
+      b.style.display = on ? "" : "none";
+      b.querySelector("span").textContent = s.link_label || "";
+      b.title = (s.link_url || "").replace("{printer}", s.moonraker_url || "").replace("{spoolman}", s.spoolman_url || "");
+    } else if (m.type === "ui") {
       collapsed = m.collapsed || collapsed; period = m.period; apply();
       if (!collapsed.stats && !loaded) loadStats();
     } else if (m.type === "status") {
@@ -1507,6 +1527,7 @@ a.tl .play { width: 14px; height: 14px; }
   });
   $("sync").onclick = function () { $("sync").disabled = true; $("stext").textContent = "Updating …"; $("status").className = "status"; orca.postMessage({ type: "sync" }); };
   $("browser").onclick = function () { orca.postMessage({ type: "browser" }); };
+  $("xlink").onclick = function () { orca.postMessage({ type: "link" }); };
   Array.prototype.forEach.call($("period").children, function (b) {
     b.onclick = function () { period = +b.dataset.p; apply(); saveUi(); loadStats(); };
   });
@@ -1575,6 +1596,10 @@ small { opacity: .7; }
 <label><input type="checkbox" name="show_tools"> Show per-tool statistics and tool changes (for tool changers)</label>
 <label class="t"><span>Tool statistics since (YYYY-MM-DD)</span><input type="text" name="tools_since" placeholder="e.g. 2026-11-09">
 <small>Date the tool changer was installed. Per-tool grams and tool changes ignore older prints; empty = all.</small></label>
+<label class="t"><span>Extra link: button label</span><input type="text" name="link_label" placeholder="e.g. XY calibration">
+<small>Optional button in the Spools &amp; Stats tab that opens a page in the browser.</small></label>
+<label class="t"><span>Extra link: address</span><input type="text" name="link_url" placeholder="e.g. {printer}/nozzle_cam.html">
+<small>{printer} = printer address, {spoolman} = Spoolman address. Empty = no button.</small></label>
 <label class="t"><span>Profile name</span><input type="text" name="name_format" placeholder="{vendor} {material} {name}">
 <small>Placeholders {vendor}, {material}, {name}; " (SM&lt;id&gt;) @&lt;printer&gt; &lt;size&gt; nozzle" is added. The material is left out if the name already contains it.</small></label>
 <label class="t"><span>Template prefix</span><input type="text" name="template_prefix" placeholder="SM-Vorlage">

@@ -3,6 +3,13 @@
 Each section is the text OrcaSlicer shows as the release's changelog.
 The newest version is at the top; keep the heading format `## [x.y.z] - YYYY-MM-DD`.
 
+## [1.10.0] - 2026-11-20
+
+### Added
+- Optional **extra link** button in the Spools & Stats tab (settings *Extra link:
+  button label* and *address*, placeholders `{printer}` and `{spoolman}`), e.g.
+  "XY calibration" → `{printer}/nozzle_cam.html`.
+
 ## [1.9.0] - 2026-11-20
 
 ### Changed

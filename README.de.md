@@ -81,6 +81,7 @@ anhaken. Die Rückfragen nach Netzwerk (Spoolman, Drucker) und Threads erlauben.
    | Low stock below (g) | Schwelle für „fast leer“, Standard 100 |
    | Show per-tool statistics and tool changes | bei Druckern mit einem Tool aus |
    | Tool statistics since | Datum des Toolwechsler-Umbaus (ältere Drucke zählen nicht pro Tool) |
+   | Extra link: label / address | optionaler Knopf, der eine Seite öffnet, z. B. `XY calibration` / `{printer}/nozzle_cam.html` (`{printer}`, `{spoolman}` = die Adressen oben) |
    | Profile name | Standard `{vendor} {material} {name}`; das Material entfällt, wenn der Name es schon enthält |
    | Template prefix | Standard `SM-Vorlage` |
    | Update automatically when OrcaSlicer starts | Standard an |

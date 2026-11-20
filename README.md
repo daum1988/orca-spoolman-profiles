@@ -80,6 +80,7 @@ Allow the prompts for network access (Spoolman, printer) and threads.
    | Low stock below (g) | threshold for "running low", default 100 |
    | Show per-tool statistics and tool changes | off for single-tool printers |
    | Tool statistics since | date your tool changer was installed (older prints are left out of the per-tool data) |
+   | Extra link: label / address | optional button that opens a page, e.g. `XY calibration` / `{printer}/nozzle_cam.html` (`{printer}`, `{spoolman}` = the addresses above) |
    | Profile name | default `{vendor} {material} {name}`; the material is left out if the name already contains it |
    | Template prefix | default `SM-Vorlage` |
    | Update automatically when OrcaSlicer starts | default on |
