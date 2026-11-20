@@ -43,28 +43,33 @@ def plugin_version() -> str:
 
 def plain_text(md: str) -> str:
     """Orca Cloud shows the changelog as plain text: no Markdown marks, one line per item."""
-    out: list[str] = []
+    # 1. one line per heading, list item and paragraph (Markdown wraps lines freely)
+    lines: list[str] = []
+    heading = False
     for line in md.splitlines():
         s = line.strip()
-        s = re.sub(r"\*\*(.+?)\*\*", r"\1", s)                    # **bold**
-        s = re.sub(r"(?<![\w*])\*(?!\s)(.+?)\*(?!\w)", r"\1", s)  # *italic*
-        s = re.sub(r"`([^`]*)`", r"\1", s)                        # `code`
-        s = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", s)            # [text](link)
-        if s.startswith("#"):
-            s = s.lstrip("#").strip() + ":"
         if not s:
-            if out and out[-1]:
-                out.append("")
+            if lines and lines[-1]:
+                lines.append("")
+            heading = False
+            continue
+        if s.startswith("#"):
+            lines.append(s.lstrip("#").strip() + ":")
+            heading = True
             continue
         item = s.startswith(("- ", "* "))
-        if item:
-            s = "- " + s[2:]
-        # a wrapped line continues the previous item or paragraph
-        if out and out[-1] and not item and not s.endswith(":") and not out[-1].endswith(":"):
-            out[-1] += " " + s
+        if lines and lines[-1] and not item and not heading:
+            lines[-1] += " " + s  # wrapped line continues the item or paragraph
         else:
-            out.append(s)
-    return "\n".join(out).strip() + "\n"
+            lines.append("- " + s[2:] if item else s)
+        heading = False
+    # 2. drop the Markdown marks
+    text = "\n".join(lines).strip()
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)                    # **bold**
+    text = re.sub(r"(?<![\w*])\*(?![\s*])(.+?)\*(?!\w)", r"\1", text)  # *italic*
+    text = re.sub(r"`([^`]*)`", r"\1", text)                        # `code`
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)            # [text](link)
+    return text + "\n"
 
 
 def changelog_section(version: str) -> str:
