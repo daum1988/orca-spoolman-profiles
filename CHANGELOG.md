@@ -3,6 +3,14 @@
 Each section is the text OrcaSlicer shows as the release's changelog.
 The newest version is at the top; keep the heading format `## [x.y.z] - YYYY-MM-DD`.
 
+## [1.9.0] - 2026-11-20
+
+### Changed
+- Profile names contain the **material**: `<Vendor> <Material> <Name> (SM<id>) …`,
+  e.g. "ELEGOO PLA Matte White (SM3)". Left out when the name already contains it
+  ("ELEGOO RAPID PLA+ Black"). New setting **Profile name** with the placeholders
+  `{vendor}`, `{material}`, `{name}`.
+
 ## [1.8.0] - 2026-11-20
 
 ### Added

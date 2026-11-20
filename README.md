@@ -18,7 +18,7 @@ your printer's history.
 
 - **Filament profiles from Spoolman:** one *standalone* profile per Spoolman
   filament with an active spool and per nozzle variant of your template, named
-  `<Vendor> <Name> (SM<id>) @<printer> <nozzle> nozzle`, filament ID `PSM<id>`.
+  `<Vendor> <Material> <Name> (SM<id>) @<printer> <nozzle> nozzle` (format configurable), filament ID `PSM<id>`.
   Colour, nozzle and bed temperature, density, diameter and price come from
   Spoolman; everything else from your template.
 - **Per-filament tuning in Spoolman:** extra fields named like the Orca setting
@@ -80,6 +80,7 @@ Allow the prompts for network access (Spoolman, printer) and threads.
    | Low stock below (g) | threshold for "running low", default 100 |
    | Show per-tool statistics and tool changes | off for single-tool printers |
    | Tool statistics since | date your tool changer was installed (older prints are left out of the per-tool data) |
+   | Profile name | default `{vendor} {material} {name}`; the material is left out if the name already contains it |
    | Template prefix | default `SM-Vorlage` |
    | Update automatically when OrcaSlicer starts | default on |
    | Spoolio fallback | read Spoolio's field names too |

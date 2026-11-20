@@ -2,7 +2,7 @@
 
 Creates OrcaSlicer filament profiles from the filaments in your [Spoolman](https://github.com/Donkie/Spoolman) server, and shows Spoolman in a tab.
 
-Every Spoolman filament with an active spool gets one **standalone** profile per nozzle variant of your template, named `<Vendor> <Name> (SM<id>) @<printer> <nozzle> nozzle` with the filament ID `PSM<id>`. Because the profiles do not inherit from another preset, OrcaSlicer's filament sync can match them by filament ID: if your printer writes the same ID into Moonraker's `lane_data`, *Sync filaments* picks exactly the right profile for every tool.
+Every Spoolman filament with an active spool gets one **standalone** profile per nozzle variant of your template, named `<Vendor> <Material> <Name> (SM<id>) @<printer> <nozzle> nozzle` with the filament ID `PSM<id>`. Because the profiles do not inherit from another preset, OrcaSlicer's filament sync can match them by filament ID: if your printer writes the same ID into Moonraker's `lane_data`, *Sync filaments* picks exactly the right profile for every tool.
 
 ### Features
 - **Update profiles from Spoolman** – one button (or automatically when OrcaSlicer starts). Profiles are written as a local preset bundle and reloaded without a restart.

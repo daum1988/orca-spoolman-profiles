@@ -18,7 +18,7 @@ der Druckhistorie des Druckers zeigt.
 
 - **Filamentprofile aus Spoolman:** pro Spoolman-Filament mit aktiver Spule und pro
   Düsen-Variante der Vorlage ein *eigenständiges* Profil
-  `<Hersteller> <Name> (SM<id>) @<Drucker> <Düse> nozzle`, Filament-ID `PSM<id>`.
+  `<Hersteller> <Material> <Name> (SM<id>) @<Drucker> <Düse> nozzle` (Format einstellbar), Filament-ID `PSM<id>`.
   Farbe, Düsen- und Betttemperatur, Dichte, Durchmesser und Preis kommen aus
   Spoolman, alles andere aus der Vorlage.
 - **Einstellungen pro Filament in Spoolman:** Zusatzfelder mit dem Namen der
@@ -81,6 +81,7 @@ anhaken. Die Rückfragen nach Netzwerk (Spoolman, Drucker) und Threads erlauben.
    | Low stock below (g) | Schwelle für „fast leer“, Standard 100 |
    | Show per-tool statistics and tool changes | bei Druckern mit einem Tool aus |
    | Tool statistics since | Datum des Toolwechsler-Umbaus (ältere Drucke zählen nicht pro Tool) |
+   | Profile name | Standard `{vendor} {material} {name}`; das Material entfällt, wenn der Name es schon enthält |
    | Template prefix | Standard `SM-Vorlage` |
    | Update automatically when OrcaSlicer starts | Standard an |
    | Spoolio fallback | Spoolios Feldnamen mitlesen |

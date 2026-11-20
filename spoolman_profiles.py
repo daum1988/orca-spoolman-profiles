@@ -6,7 +6,7 @@
 # name = "Spoolman Profiles"
 # description = "Creates standalone OrcaSlicer filament profiles (filament ID PSM<id>) from Spoolman and shows the Spoolman web UI in a tab."
 # author = "indx-trident-350"
-# version = "1.8.0"
+# version = "1.9.0"
 # ///
 
 """Spoolman Profiles - OrcaSlicer 2.5 plugin for the Voron Trident 350 INDX setup.
@@ -61,7 +61,7 @@ except ImportError:  # pragma: no cover
     orca = None
 
 PLUGIN_NAME = "Spoolman Profiles"
-PLUGIN_VERSION = "1.8.0"
+PLUGIN_VERSION = "1.9.0"
 BUNDLE_ID = "spoolman-profiles"
 ID_PREFIX = "PSM"
 TIMEOUT = 15
@@ -73,6 +73,7 @@ DEFAULT_SETTINGS = {
     "tools_since": "",
     "show_tools": True,
     "template_prefix": "SM-Vorlage",
+    "name_format": "{vendor} {material} {name}",
     "auto_sync": True,
     "include_all": False,
     "layout": "two_tabs",
@@ -159,6 +160,8 @@ def _normalize(data: dict) -> dict:
     except (TypeError, ValueError):
         s["low_stock_g"] = DEFAULT_SETTINGS["low_stock_g"]
     s["template_prefix"] = str(s["template_prefix"] or "").strip() or DEFAULT_SETTINGS["template_prefix"]
+    nf = str(s["name_format"] or "").strip()
+    s["name_format"] = nf if any(k in nf for k in ("{vendor}", "{material}", "{name}")) else DEFAULT_SETTINGS["name_format"]
     if s["layout"] not in LAYOUTS:
         s["layout"] = DEFAULT_SETTINGS["layout"]
     for k in ("auto_sync", "include_all", "spoolio_fallback", "show_tools"):
@@ -365,8 +368,20 @@ def find_template(templates: dict, material) -> list | None:
     return templates[best] if best else None
 
 
+def profile_label(fmt: str, vendor: str, material: str, name: str) -> str:
+    """Profile name from the format, e.g. "{vendor} {material} {name}" -> "ELEGOO PLA Matte White".
+
+    The material is left out when vendor or name already contain it as a word, also
+    with a suffix like "+" or "-CF" ("RAPID PLA+ Black" stays as it is).
+    """
+    if material and re.search(rf"(?<![A-Za-z0-9]){re.escape(material)}(?![A-Za-z0-9])", f"{vendor} {name}", re.I):
+        material = ""
+    label = fmt.replace("{vendor}", vendor).replace("{material}", material).replace("{name}", name)
+    return re.sub(r"\s+", " ", label).strip()
+
+
 def build_profiles(filaments: list, spools: list, templates: dict, include_all: bool = False,
-                   spoolio_fallback: bool = False) -> dict:
+                   spoolio_fallback: bool = False, name_format: str = "{vendor} {name}") -> dict:
     """Returns {"profiles": {filename: (name, json)}, "skipped": n, "warnings": [...], "active": n}."""
     active = {int(s["filament"]["id"]) for s in spools if not s.get("archived") and s.get("filament")}
     profiles: dict = {}
@@ -383,7 +398,8 @@ def build_profiles(filaments: list, spools: list, templates: dict, include_all: 
             skipped += 1
             continue
         vendor = str((fil.get("vendor") or {}).get("name") or "")
-        label = " ".join(x for x in (vendor, str(fil.get("name") or "")) if x) or str(fil.get("material") or "")
+        label = (profile_label(name_format, vendor, str(fil.get("material") or ""), str(fil.get("name") or ""))
+                 or str(fil.get("material") or ""))
 
         for tpl in tpl_list:  # one profile per nozzle variant, all with the same filament ID
             p = copy.deepcopy(tpl["json"])
@@ -975,7 +991,7 @@ def _sync(reason: str) -> dict:
         return {"ok": False, "text": f"No template found. Create a filament '{s['template_prefix']} <Material>' "
                                      f"per material in Orca (searched user/{acct.name})."}
     filaments, spools = fetch_spoolman(s["spoolman_url"])
-    built = build_profiles(filaments, spools, templates, s["include_all"], s["spoolio_fallback"])
+    built = build_profiles(filaments, spools, templates, s["include_all"], s["spoolio_fallback"], s["name_format"])
     warnings += built["warnings"]
     files = {fn: profile_text(p) for fn, (_, p) in built["profiles"].items()}
 
@@ -1559,6 +1575,8 @@ small { opacity: .7; }
 <label><input type="checkbox" name="show_tools"> Show per-tool statistics and tool changes (for tool changers)</label>
 <label class="t"><span>Tool statistics since (YYYY-MM-DD)</span><input type="text" name="tools_since" placeholder="e.g. 2026-11-09">
 <small>Date the tool changer was installed. Per-tool grams and tool changes ignore older prints; empty = all.</small></label>
+<label class="t"><span>Profile name</span><input type="text" name="name_format" placeholder="{vendor} {material} {name}">
+<small>Placeholders {vendor}, {material}, {name}; " (SM&lt;id&gt;) @&lt;printer&gt; &lt;size&gt; nozzle" is added. The material is left out if the name already contains it.</small></label>
 <label class="t"><span>Template prefix</span><input type="text" name="template_prefix" placeholder="SM-Vorlage">
 <small>Filament templates in Orca: "&lt;prefix&gt; &lt;Material&gt; ... @&lt;printer&gt; &lt;size&gt; nozzle".</small></label>
 <label><input type="checkbox" name="auto_sync"> Update automatically when OrcaSlicer starts</label>
