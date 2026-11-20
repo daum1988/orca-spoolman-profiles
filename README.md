@@ -180,7 +180,12 @@ Bump `# version` and `PLUGIN_VERSION` in `spoolman_profiles.py`, add a section
 to `CHANGELOG.md`, commit, then publish a GitHub release with the tag
 `v<version>`. The workflow `.github/workflows/publish-orcacloud.yml` builds the
 files per OS (`python build.py`) and uploads them to Orca Cloud (needs the repo
-variable `ORCACLOUD_PUBLISH=true` and the repo allowed in Orca Cloud).
+variable `ORCACLOUD_PUBLISH=true` and the repo allowed in Orca Cloud). If Orca
+Cloud answers `EDIT_CONFLICT` (plugin being edited or reviewed), it retries twice.
+
+A release only carries the files, the version and the changelog. The plugin
+description in Orca Cloud is kept in [`orcacloud/description.md`](orcacloud/description.md);
+when it changes, paste it on the plugin page in Orca Cloud by hand.
 
 ## License
 

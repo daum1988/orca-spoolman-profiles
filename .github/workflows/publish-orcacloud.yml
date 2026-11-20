@@ -8,7 +8,8 @@
 #      ORCACLOUD_PUBLISH = true
 #
 # The release text becomes the changelog OrcaSlicer shows; if it is empty, the
-# version's section from CHANGELOG.md is used.
+# version's section from CHANGELOG.md is used. The plugin description is not part
+# of a release: paste orcacloud/description.md on the plugin page in Orca Cloud.
 
 name: Publish plugin to Orca Cloud
 
@@ -25,8 +26,8 @@ jobs:
     if: vars.ORCACLOUD_PUBLISH == 'true' && startsWith(github.event.release.tag_name, 'v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -45,16 +46,27 @@ jobs:
           changelog="$(printf '%s' "$changelog" | head -c 4000)"
           metadata="$(jq -cn --arg version "$version" --arg changelog "$changelog" \
             '{version: $version, changelog: $changelog}')"
-          oidc_token="$(curl -sS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=orcacloud" | jq -r .value)"
           args=(--form-string "metadata=$metadata")
           for file in dist/*.py; do
             args+=(-F "files=@$file")
           done
-          status="$(curl -sS -o response.json -w '%{http_code}' \
-            -H "Authorization: Bearer $oidc_token" \
-            "${args[@]}" \
-            https://api.orcaslicer.com/api/v1/plugin-publish/releases)"
-          cat response.json
-          echo
-          [ "$status" = "201" ]
+          # Orca Cloud answers EDIT_CONFLICT while the plugin is being changed (e.g. its
+          # review or an edit on the plugin page): wait and try again, like 5xx errors.
+          for attempt in 1 2 3; do
+            oidc_token="$(curl -sS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=orcacloud" | jq -r .value)"
+            status="$(curl -sS --max-time 300 -o response.json -w '%{http_code}' \
+              -H "Authorization: Bearer $oidc_token" \
+              "${args[@]}" \
+              https://api.orcaslicer.com/api/v1/plugin-publish/releases)" || status="000"
+            echo "attempt $attempt: HTTP $status"
+            cat response.json 2>/dev/null || true
+            echo
+            [ "$status" = "201" ] && exit 0
+            if grep -q '"EDIT_CONFLICT"' response.json 2>/dev/null || [ "${status:0:1}" = "5" ] || [ "$status" = "000" ]; then
+              [ "$attempt" -lt 3 ] && { echo "retrying in 60 s"; sleep 60; }
+              continue
+            fi
+            exit 1
+          done
+          exit 1
