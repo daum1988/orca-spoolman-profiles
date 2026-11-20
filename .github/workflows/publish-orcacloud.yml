@@ -54,12 +54,15 @@ jobs:
           for file in dist/*.py; do
             args+=(-F "files=@$file")
           done
-          # Orca Cloud answers EDIT_CONFLICT while the plugin is being changed (e.g. its
-          # review or an edit on the plugin page): wait and try again, like 5xx errors.
+          # Orca Cloud answers only after it has processed the release (incl. its automated
+          # review), which can take many minutes: wait up to 20 min. EDIT_CONFLICT (plugin
+          # being changed) and 5xx are retried. A timeout is not retried: the release may
+          # have arrived anyway, and a second upload of the same version would not help.
           for attempt in 1 2 3; do
+            rm -f response.json
             oidc_token="$(curl -sS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
               "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=orcacloud" | jq -r .value)"
-            status="$(curl -sS --max-time 300 -o response.json -w '%{http_code}' \
+            status="$(curl -sS --max-time 1200 -o response.json -w '%{http_code}' \
               -H "Authorization: Bearer $oidc_token" \
               "${args[@]}" \
               https://api.orcaslicer.com/api/v1/plugin-publish/releases)" || status="000"
@@ -67,7 +70,11 @@ jobs:
             cat response.json 2>/dev/null || true
             echo
             [ "$status" = "201" ] && exit 0
-            if grep -q '"EDIT_CONFLICT"' response.json 2>/dev/null || [ "${status:0:1}" = "5" ] || [ "$status" = "000" ]; then
+            if [ "$status" = "000" ]; then
+              echo "::warning::No answer from Orca Cloud. Check on the plugin page whether version $version arrived before re-running."
+              exit 1
+            fi
+            if grep -q '"EDIT_CONFLICT"' response.json 2>/dev/null || [ "${status:0:1}" = "5" ]; then
               [ "$attempt" -lt 3 ] && { echo "retrying in 60 s"; sleep 60; }
               continue
             fi
