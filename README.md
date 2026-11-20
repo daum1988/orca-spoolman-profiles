@@ -186,7 +186,9 @@ Cloud answers `EDIT_CONFLICT` (plugin being edited or reviewed), it retries twic
 
 A release only carries the files, the version and the changelog. The plugin
 description in Orca Cloud is kept in [`orcacloud/description.md`](orcacloud/description.md);
-when it changes, paste it on the plugin page in Orca Cloud by hand.
+when it changes, paste it on the plugin page in Orca Cloud by hand. Orca Cloud turns
+every line break into a new line, so that file keeps each paragraph and list item
+on one line. The changelog is sent as plain text (`build.py` strips the Markdown).
 
 ## License
 

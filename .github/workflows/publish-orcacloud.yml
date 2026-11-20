@@ -41,9 +41,13 @@ jobs:
           set -euo pipefail
           tag="$(jq -r '.release.tag_name' "$GITHUB_EVENT_PATH")"
           version="${tag#v}"
-          changelog="$(jq -r '.release.body // ""' "$GITHUB_EVENT_PATH")"
-          if [ -z "${changelog//[[:space:]]/}" ]; then changelog="$(cat changelog_file.md)"; fi
-          changelog="$(printf '%s' "$changelog" | head -c 4000)"
+          # Orca Cloud shows the changelog as plain text: use the release text if there is
+          # one, else the CHANGELOG.md section, both without Markdown marks.
+          jq -r '.release.body // ""' "$GITHUB_EVENT_PATH" > release_body.md
+          if [ -n "$(tr -d '[:space:]' < release_body.md)" ]; then
+            python build.py --plain release_body.md changelog_file.md
+          fi
+          changelog="$(head -c 4000 changelog_file.md)"
           metadata="$(jq -cn --arg version "$version" --arg changelog "$changelog" \
             '{version: $version, changelog: $changelog}')"
           args=(--form-string "metadata=$metadata")
