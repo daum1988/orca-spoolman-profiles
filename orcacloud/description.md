@@ -21,7 +21,7 @@ right profile for every tool.
   field names (`flow_ratio`, `max_volumetric_speed`, `retraction_length`,
   `retraction_speed`) are read as a fallback.
 - **Statistics** from Moonraker's print history and Spoolman (read only): filament
-  used, prints, cost, tool changes (incl. the INDX counter), use per week by colour,
+  used, print time, prints, cost, tool changes (incl. the INDX counter), use per week by colour,
   materials, most used filaments, grams per tool, spools running low and the print
   history. Period selectable.
 - **Spoolman tab** with the Spoolman web UI, and a **Spools & Stats** tab with

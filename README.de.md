@@ -144,6 +144,7 @@ Druckhistorie und Spoolman; gebucht oder geändert wird nichts:
 
 - verbrauchtes Filament im Zeitraum, gesamt und seit dem Datum *Tool statistics
   since*, dazu Moonrakers Gesamtzähler (m);
+- Druckzeit im Zeitraum, gesamt und seit diesem Datum, Schnitt pro fertigem Druck;
 - Drucke und abgebrochene Drucke, Kosten aus den Spoolman-Preisen;
 - Toolwechsel pro Zeitraum aus den Druckdateien und beim Bondtech INDX der
   Zähler `toolchange_count` des Druckers;

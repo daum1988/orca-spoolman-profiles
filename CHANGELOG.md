@@ -3,6 +3,13 @@
 Each section is the text OrcaSlicer shows as the release's changelog.
 The newest version is at the top; keep the heading format `## [x.y.z] - YYYY-MM-DD`.
 
+## [1.8.0] - 2026-11-20
+
+### Added
+- **Print time** in the statistics: in the period, all time (Moonraker's lifetime
+  counter) and since the *Tool statistics since* date, average per finished print, and a
+  duration column in the print history.
+
 ## [1.7.0] - 2026-11-20
 
 ### Added

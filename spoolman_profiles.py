@@ -6,7 +6,7 @@
 # name = "Spoolman Profiles"
 # description = "Creates standalone OrcaSlicer filament profiles (filament ID PSM<id>) from Spoolman and shows the Spoolman web UI in a tab."
 # author = "indx-trident-350"
-# version = "1.7.0"
+# version = "1.8.0"
 # ///
 
 """Spoolman Profiles - OrcaSlicer 2.5 plugin for the Voron Trident 350 INDX setup.
@@ -61,7 +61,7 @@ except ImportError:  # pragma: no cover
     orca = None
 
 PLUGIN_NAME = "Spoolman Profiles"
-PLUGIN_VERSION = "1.7.0"
+PLUGIN_VERSION = "1.8.0"
 BUNDLE_ID = "spoolman-profiles"
 ID_PREFIX = "PSM"
 TIMEOUT = 15
@@ -569,6 +569,7 @@ def compact_job(j: dict) -> dict | None:
     try:
         return {"id": str(j.get("job_id")), "name": str(j.get("filename") or ""),
                 "start": float(j.get("start_time") or 0), "end": float(j.get("end_time") or 0), "status": status,
+                "print_s": float(j.get("print_duration") or 0),
                 "used_mm": float(j.get("filament_used") or 0), "total_mm": float(m.get("filament_total") or 0),
                 "weights": weights, "changes": changes, "names": _jlist(m.get("filament_name")),
                 "types": _jlist(m.get("filament_type")), "colors": _jlist(m.get("filament_colors"))}
@@ -707,6 +708,9 @@ def compute_stats(jobs: list, filaments: list, spools: list, days: int, low_g: i
     prints = cancelled = unmatched = 0
     tools: dict = {}  # tool index -> {"g", "prints"}
     total_all = total_tools = 0.0  # independent of the period
+    time_period = time_all = time_since = 0.0  # print time in seconds, all finished jobs
+    time_done = 0.0  # print time of completed prints in the period (for the average)
+    n_done = 0
     changes = 0.0
     change_jobs = 0
 
@@ -715,6 +719,15 @@ def compute_stats(jobs: list, filaments: list, spools: list, days: int, low_g: i
             frac = 1.0
         else:
             frac = min(1.0, job["used_mm"] / job["total_mm"]) if job["total_mm"] > 0 else 0.0
+        ps = float(job.get("print_s") or 0.0)
+        time_all += ps
+        if tsince and job["start"] >= tsince:
+            time_since += ps
+        if job["start"] >= since:
+            time_period += ps
+            if job["status"] == "completed" and ps > 0:
+                time_done += ps
+                n_done += 1
         rows = []
         for i, w in enumerate(job["weights"]):
             gr = w * frac
@@ -774,7 +787,7 @@ def compute_stats(jobs: list, filaments: list, spools: list, days: int, low_g: i
         hist.append({"t": job["start"], "end": job.get("end") or 0.0, "file": job["name"].split("/")[-1],
                      "name": re.sub(r"\.gcode$", "", job["name"].split("/")[-1]),
                      "status": job["status"], "g": jg, "cost": sum(jc) if jc else None,
-                     "colours": [r["colour"] for r in rows]})
+                     "colours": [r["colour"] for r in rows], "print_s": ps})
 
     low = []
     for s in spools:
@@ -822,7 +835,10 @@ def compute_stats(jobs: list, filaments: list, spools: list, days: int, low_g: i
             "tools": tool_rows, "changes": round(changes), "change_jobs": change_jobs, "indx_changes": indx_count,
             "tools_since": tools_since if tsince > since else "",
             "total_all": total_all, "since_date": tools_since if tsince else "", "total_since": total_tools,
-            "printer_m": float((totals or {}).get("total_filament_used") or 0) / 1000.0}
+            "printer_m": float((totals or {}).get("total_filament_used") or 0) / 1000.0,
+            "time_period": time_period, "time_all": time_all, "time_since": time_since,
+            "time_avg": time_done / n_done if n_done else 0.0,
+            "printer_time": float((totals or {}).get("total_print_time") or 0)}
 
 
 def _stats_and_post(period) -> None:
@@ -1125,7 +1141,7 @@ PANEL_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><style>
 :root { color-scheme: light dark;
   --line: rgba(127,127,127,.22); --surf: rgba(127,127,127,.07); --surf2: rgba(127,127,127,.12);
   --muted: .66; --acc: #009688; --acc-soft: rgba(0,150,136,.16);
-  --ok: #2e9d57; --bad: #d64545; --warn: #e8890c; --blue: #3b82f6; --amber: #d9a400; --violet: #8b5cf6;
+  --ok: #2e9d57; --bad: #d64545; --warn: #e8890c; --blue: #3b82f6; --cyan: #06b6d4; --amber: #d9a400; --violet: #8b5cf6;
   --r: 10px; }
 * { box-sizing: border-box; }
 html, body { margin: 0; font: 13px/1.45 "Segoe UI", system-ui, sans-serif; }
@@ -1276,6 +1292,7 @@ a.tl .play { width: 14px; height: 14px; }
   <symbol id="i-print" viewBox="0 0 24 24"><path d="M4 20h16M6 20V9l6-5 6 5v11"/><path d="M10 20v-6h4v6"/></symbol>
   <symbol id="i-coin" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M15 9.5a3 3 0 1 0 0 5M8 11h5M8 13h5"/></symbol>
   <symbol id="i-swap" viewBox="0 0 24 24"><path d="M7 7h11l-3-3M17 17H6l3 3"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
   <symbol id="i-play" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M10 9l5 3-5 3z"/></symbol>
   <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3l9 16H3z"/><path d="M12 10v4M12 17h.01"/></symbol>
 </svg>
@@ -1327,6 +1344,12 @@ a.tl .play { width: 14px; height: 14px; }
   var MAT = ["#009688", "#3b82f6", "#e8890c", "#8b5cf6", "#d64545", "#d9a400", "#14b8a6", "#ec4899", "#64748b"];
   function esc(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
     return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+  function hours(s) {
+    s = Math.round(s / 60);  // minutes
+    if (s < 60) return s + " min";
+    var h = Math.floor(s / 60), m = s % 60;
+    return h >= 100 ? h.toLocaleString() + " h" : h + " h" + (m ? " " + m + " min" : "");
+  }
   function grams(x) { return x >= 1000 ? (x / 1000).toFixed(2).replace(".", ",") + " kg" : Math.round(x) + " g"; }
   function money(x, cur) { return x == null ? "–" : x.toFixed(2).replace(".", ",") + " " + cur; }
   function sw(c) { return '<span class="sw" style="background:' + esc(c) + '"></span>'; }
@@ -1399,6 +1422,10 @@ a.tl .play { width: 14px; height: 14px; }
       "All time: <b>" + grams(d.total_all) + "</b>" +
       (d.since_date ? "<br>Since " + esc(d.since_date) + (d.show_tools !== false ? " (tool changer)" : "") + ": <b>" + grams(d.total_since) + "</b>" : "") +
       (d.printer_m ? "<br>Printer counter: " + Math.round(d.printer_m).toLocaleString() + " m" : ""));
+    h += kpi("clock", "var(--cyan)", "Print time", hours(d.time_period),
+      "All time: <b>" + hours(d.printer_time || d.time_all) + "</b>" +
+      (d.since_date ? "<br>Since " + esc(d.since_date) + ": <b>" + hours(d.time_since) + "</b>" : "") +
+      (d.time_avg ? "<br>Ø " + hours(d.time_avg) + " per finished print" : ""));
     h += kpi("print", "var(--blue)", "Prints", d.prints, d.cancelled ? d.cancelled + " cancelled / failed (counted partly)" : "none cancelled");
     h += kpi("coin", "var(--amber)", "Filament cost", d.cost > 0 ? money(d.cost, cur) : "–", "from Spoolman prices");
     if (d.show_tools !== false)
@@ -1425,15 +1452,16 @@ a.tl .play { width: 14px; height: 14px; }
     }
     var st = { completed: "done", cancelled: "cancelled", error: "error", klippy_shutdown: "shutdown", klippy_disconnect: "disconnected", interrupted: "interrupted" };
     h += '<div class="panel"><details class="hist"><summary><svg class="i chev"><use href="#i-chev"/></svg>Print history' +
-      '<span class="chip">' + d.history_count + ' prints · ' + grams(d.total_g) + '</span>' +
+      '<span class="chip">' + d.history_count + ' prints · ' + grams(d.total_g) + ' · ' + hours(d.time_period) + '</span>' +
       (d.timelapses ? '<span class="chip">' + d.timelapses + ' timelapses</span>' : '') + '</summary><div class="tbl"><table>' +
-      '<tr><th>Date</th><th>Name</th><th>Filament</th><th>Status</th><th class="r">Used</th><th class="r">Cost</th>' +
+      '<tr><th>Date</th><th>Name</th><th>Filament</th><th>Status</th><th class="r">Duration</th><th class="r">Used</th><th class="r">Cost</th>' +
       (d.timelapses ? '<th>Timelapse</th>' : '') + '</tr>' +
       d.history.map(function (j) {
         var dt = new Date(j.t * 1000);
         return '<tr><td>' + dt.toLocaleDateString() + ' ' + dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) +
           '</td><td>' + esc(j.name) + '</td><td><span class="sws">' + j.colours.map(sw).join("") + '</span></td><td><span class="st ' +
-          esc(j.status) + '">' + esc(st[j.status] || j.status) + '</span></td><td class="r">' + grams(j.g) + '</td><td class="r">' +
+          esc(j.status) + '">' + esc(st[j.status] || j.status) + '</span></td><td class="r">' + (j.print_s ? hours(j.print_s) : '–') +
+          '</td><td class="r">' + grams(j.g) + '</td><td class="r">' +
           money(j.cost, cur) + '</td>' + (d.timelapses ? '<td>' + (j.timelapse ? '<a class="tl" data-url="' + esc(j.timelapse) + '" data-name="' + esc(j.name) +
           '" title="Play the timelapse">' + (j.thumb ? '<img src="' + esc(j.thumb) + '" alt="">' : '') +
           '<svg class="i play"><use href="#i-play"/></svg>Video</a>' : '') + '</td>' : '') + '</tr>'; }).join("") + '</table></div>' +

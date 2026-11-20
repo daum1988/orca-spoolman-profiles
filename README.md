@@ -144,6 +144,7 @@ history and Spoolman; nothing is booked or changed:
 
 - filament used in the period, all time and since the *Tool statistics since*
   date, plus Moonraker's lifetime counter (m);
+- print time in the period, all time and since that date, average per finished print;
 - prints and cancelled prints, cost from Spoolman prices;
 - tool changes per period from the print files and, on Bondtech INDX, the
   printer's `toolchange_count`;
