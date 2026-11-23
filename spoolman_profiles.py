@@ -6,7 +6,7 @@
 # name = "Spoolman Profiles"
 # description = "Creates standalone OrcaSlicer filament profiles (filament ID PSM<id>) from Spoolman and shows the Spoolman web UI in a tab."
 # author = "indx-trident-350"
-# version = "1.10.0"
+# version = "1.10.1"
 # ///
 
 """Spoolman Profiles - OrcaSlicer 2.5 plugin for the Voron Trident 350 INDX setup.
@@ -61,7 +61,7 @@ except ImportError:  # pragma: no cover
     orca = None
 
 PLUGIN_NAME = "Spoolman Profiles"
-PLUGIN_VERSION = "1.10.0"
+PLUGIN_VERSION = "1.10.1"
 BUNDLE_ID = "spoolman-profiles"
 ID_PREFIX = "PSM"
 TIMEOUT = 15
@@ -1048,7 +1048,9 @@ def _sync(reason: str) -> dict:
     if old_presets:
         warnings.insert(0, f"{len(old_presets)} old profiles with filament ID PSM... from the PowerShell script are "
                            "still loaded (e.g. '" + old_presets[0] + "'). They make the filament sync ambiguous - "
-                           "close Orca and delete them from filament/base of your user folder.")
+                           "close Orca and delete only their .json files in filament/base of your user "
+                           "folder. Keep the .info files: on the next start Orca deletes the copies in "
+                           "Orca Cloud too (with the .info gone, they come back from the cloud).")
     lines += warnings
     return {"ok": not old_presets, "text": "\n".join(lines), "changed": bool(new or changed or removed),
             "warn": bool(warnings)}

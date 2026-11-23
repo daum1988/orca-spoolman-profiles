@@ -3,6 +3,14 @@
 Each section is the text OrcaSlicer shows as the release's changelog.
 The newest version is at the top; keep the heading format `## [x.y.z] - YYYY-MM-DD`.
 
+## [1.10.1] - 2026-11-23
+
+### Fixed
+- The warning about old profiles with the same filament ID now says to delete
+  only their .json files and keep the .info files. Orca then deletes the copies
+  in Orca Cloud on the next start; deleting the .info too made them come back
+  from the cloud.
+
 ## [1.10.0] - 2026-11-20
 
 ### Added

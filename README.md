@@ -164,7 +164,7 @@ The history is cached in `<Orca data folder>/spoolman_profiles/history_cache.jso
 | Symptom | Fix |
 |---|---|
 | Profiles not in the filament list | look under *Bundle presets → Spoolman Profiles* |
-| Sync leaves a filament generic | the printer must report `PSM<id>`; delete older profiles with the same filament ID (two matches make the sync ambiguous) |
+| Sync leaves a filament generic | the printer must report `PSM<id>`; remove older profiles with the same filament ID (two matches make the sync ambiguous): close Orca, delete only their `.json` and keep the `.info`, so that Orca also deletes the copy in Orca Cloud on the next start |
 | "No template found" | create `SM-Vorlage <Material>` filaments (standalone) |
 | Statistics: "Not reachable" | check the printer address (as in Mainsail/Fluidd) |
 | Spoolman tab shows the old address | restart OrcaSlicer |

@@ -165,7 +165,7 @@ mit Material und Farbe aus der Druckdatei, ohne Kosten. Die Historie wird in
 | Symptom | Lösung |
 |---|---|
 | Profile nicht in der Filamentliste | unter *Bundle presets → Spoolman Profiles* nachsehen |
-| Abgleich nimmt ein generisches Filament | der Drucker muss `PSM<id>` melden; ältere Profile mit derselben Filament-ID löschen (zwei Treffer machen den Abgleich mehrdeutig) |
+| Abgleich nimmt ein generisches Filament | der Drucker muss `PSM<id>` melden; ältere Profile mit derselben Filament-ID entfernen (zwei Treffer machen den Abgleich mehrdeutig): Orca schließen, nur ihre `.json` löschen und die `.info` liegen lassen, dann löscht Orca beim nächsten Start auch die Kopie in der Orca Cloud |
 | „No template found“ | Filamente `SM-Vorlage <Material>` (eigenständig) anlegen |
 | Statistik: „Not reachable“ | Druckeradresse prüfen (wie in Mainsail/Fluidd) |
 | Spoolman-Reiter zeigt die alte Adresse | OrcaSlicer neu starten |
